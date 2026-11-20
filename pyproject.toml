@@ -1,0 +1,15 @@
+[project]
+name = "operator-agent"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "agent-framework",
+    "operator-allocation",
+]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+agent-framework = { workspace = true }
+operator-allocation = { workspace = true }
