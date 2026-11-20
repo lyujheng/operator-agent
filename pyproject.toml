@@ -13,3 +13,8 @@ members = ["packages/*"]
 [tool.uv.sources]
 agent-framework = { workspace = true }
 operator-allocation = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
