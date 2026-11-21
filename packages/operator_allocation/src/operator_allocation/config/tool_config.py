@@ -31,8 +31,8 @@ PROCESS_SERVER = ToolProfile(
     name="process_server",
     description="Operator processing: match/add dev operators, link status (per-repo template)",
     tool_paths=[
-        "excel_tools.read_dev_operators",
-        "excel_tools.add_dev_operator",
+        "data_tools.read_dev_operators",
+        "data_tools.add_dev_operator",
         "repo_tools.list_repo_files",
         "repo_tools.search_file_content",
         "repo_tools.read_file",
@@ -42,10 +42,10 @@ PROCESS_SERVER = ToolProfile(
 
 RESULT_SERVER = ToolProfile(
     name="result_server",
-    description="Result generation: output and validate the final Excel",
+    description="Result consolidation and validation (in-memory)",
     tool_paths=[
-        "excel_tools.output_result_excel",
-        "excel_tools.check_result_excel",
+        "data_tools.format_result",
+        "data_tools.check_result",
     ],
 )
 

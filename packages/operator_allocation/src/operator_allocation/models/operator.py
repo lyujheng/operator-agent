@@ -1,4 +1,8 @@
-"""Operator pydantic models: RequirementOperator, DevOperator, ResultOperator."""
+"""Operator pydantic models: RequirementOperator, DevOperator, ResultOperator.
+
+Also defines structured output schemas (IdentifyResult, ProcessResult)
+used by ReActAgent sessions.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ class RequirementOperator(BaseModel):
     priority: str = ""  # P0, P1, P2
     reference_impl: str = ""  # URL or file path
     operator_lib: str | None = None  # FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized
+    link_status: str | None = None  # dev table operator name, or None
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump()
@@ -22,7 +27,6 @@ class RequirementOperator(BaseModel):
 class DevOperator(BaseModel):
     """A single operator from the development table."""
 
-    id: int
     operator_name: str
     status: str = "not_developed"  # not_developed / in_progress / completed
 
@@ -34,11 +38,11 @@ class ResultOperator(BaseModel):
     priority: str = ""
     reference_impl: str = ""
     operator_lib: str = ""  # FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized
-    link_status: int | None = None  # dev table operator id, or None
+    link_status: str | None = None  # dev table operator name, or None
 
     @classmethod
     def from_requirement(
-        cls, req: RequirementOperator, link_status: int | None = None
+        cls, req: RequirementOperator, link_status: str | None = None
     ) -> ResultOperator:
         return cls(
             operator_name=req.operator_name,
@@ -47,3 +51,23 @@ class ResultOperator(BaseModel):
             operator_lib=req.operator_lib or "unrecognized",
             link_status=link_status,
         )
+
+
+# ── Structured output schemas for ReAct sessions ────────────────
+
+
+class IdentifyResult(BaseModel):
+    """identify_agent ReAct session structured return value."""
+
+    operator_name: str  # requirement operator being processed
+    operator_lib: str  # FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized
+    summary: str  # LLM summary of this identification session
+
+
+class ProcessResult(BaseModel):
+    """process_agent ReAct session structured return value."""
+
+    operator_name: str  # requirement operator being processed
+    link_status: str | None  # linked dev operator name, or None
+    new_dev_operator: dict | None = None  # {"operator_name": str, "sheet_name": str} or None
+    summary: str  # LLM summary of this processing session

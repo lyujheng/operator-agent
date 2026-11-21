@@ -7,11 +7,16 @@ results are summarized into the main_agent's message history.
 
 from __future__ import annotations
 
+import json
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class PlanStep(BaseModel):
@@ -34,6 +39,35 @@ class ExecutionPlan(BaseModel):
     )
     status: str = "pending"  # "pending" | "executing" | "completed" | "failed"
     current_step_index: int = 0  # for resume after interruption
+
+    def save(self, path: str | Path) -> None:
+        """Persist the plan to a JSON file for resume after interruption."""
+        filepath = Path(path)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath.write_text(
+            self.model_dump_json(indent=2), encoding="utf-8"
+        )
+        logger.debug("Plan saved to %s", filepath)
+
+    @classmethod
+    def load(cls, path: str | Path) -> ExecutionPlan | None:
+        """Load a previously persisted plan, or return None if not found."""
+        filepath = Path(path)
+        if not filepath.exists():
+            return None
+        try:
+            data = json.loads(filepath.read_text(encoding="utf-8"))
+            plan = cls(**data)
+            logger.info(
+                "Resumed plan from %s (step %d/%d)",
+                filepath,
+                plan.current_step_index,
+                len(plan.steps),
+            )
+            return plan
+        except Exception:
+            logger.warning("Failed to load plan from %s", filepath, exc_info=True)
+            return None
 
 
 class StepResult(BaseModel):

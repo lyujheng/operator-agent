@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from agent_framework.agent.base import BaseAgent, MessageHistory
@@ -50,6 +51,7 @@ class PlanSolveAgent(BaseAgent):
         max_retries: int = 10,
         step_executors: dict[str, Callable[..., Awaitable[Any]]] | None = None,
         summarizers: dict[str, StepResultSummarizer] | None = None,
+        plan_persist_path: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -57,9 +59,14 @@ class PlanSolveAgent(BaseAgent):
         self.max_retries = max_retries
         self.step_executors = step_executors or {}
         self.summarizers = summarizers or {}
+        self.plan_persist_path = plan_persist_path
 
     async def run(self, input_data: Any) -> dict[str, Any]:
         """Execute the full plan-and-solve loop.
+
+        If ``plan_persist_path`` is set, the plan is saved to disk after
+        each step.  On restart, a previously incomplete plan is resumed
+        from the last completed step.
 
         Parameters
         ----------
@@ -80,19 +87,39 @@ class PlanSolveAgent(BaseAgent):
             user_content = json.dumps(input_data, ensure_ascii=False, default=str)
         history.append(Message(role="user", content=user_content))
 
-        # ── Phase 1: Planning ────────────────────────────────────
-        plan = await self._generate_plan(history)
+        # ── Phase 1: Planning (or resume) ────────────────────────
+        resumed_plan: ExecutionPlan | None = None
+        start_index = 0
+
+        if self.plan_persist_path:
+            resumed_plan = ExecutionPlan.load(self.plan_persist_path)
+
+        if resumed_plan and resumed_plan.status == "executing":
+            plan = resumed_plan
+            start_index = plan.current_step_index
+            logger.info(
+                "Resuming plan from step %d/%d",
+                start_index,
+                len(plan.steps),
+            )
+        else:
+            plan = await self._generate_plan(history)
+
         plan.status = "executing"
+        self._persist_plan(plan)
 
         # ── Phase 2: Step-by-step execution ──────────────────────
-        for idx, step in enumerate(plan.steps):
+        for idx in range(start_index, len(plan.steps)):
+            step = plan.steps[idx]
             plan.current_step_index = idx
             step_result = await self._execute_step_with_retries(
                 step, history, step_results
             )
             step_results[step.step_name] = step_result
+            self._persist_plan(plan)
 
         plan.status = "completed"
+        self._persist_plan(plan)
 
         # ── Statistics ───────────────────────────────────────────
         stats = {
@@ -106,6 +133,18 @@ class PlanSolveAgent(BaseAgent):
             "results": {k: v.model_dump() for k, v in step_results.items()},
             "statistics": stats,
         }
+
+    def _persist_plan(self, plan: ExecutionPlan) -> None:
+        """Save plan to disk if persistence is configured."""
+        if self.plan_persist_path:
+            try:
+                plan.save(self.plan_persist_path)
+            except Exception:
+                logger.warning(
+                    "Failed to persist plan to %s",
+                    self.plan_persist_path,
+                    exc_info=True,
+                )
 
     # ── Phase 1 ──────────────────────────────────────────────────
 
@@ -238,7 +277,7 @@ class PlanSolveAgent(BaseAgent):
 
                     history.append(
                         Message(
-                            role="tool",
+                            role="user",
                             content=json.dumps(result.summary, ensure_ascii=False, default=str),
                         )
                     )
@@ -318,7 +357,7 @@ class PlanSolveAgent(BaseAgent):
             f"Does the result meet the criteria? "
             f"Answer with a JSON: {{\"passed\": true/false, \"reason\": \"...\"}}"
         )
-        history.append(Message(role="system", content=validation_prompt))
+        history.append(Message(role="user", content=validation_prompt))
         response = await self.llm_client.chat_completions(history.messages)
         history.append(response.message)
 

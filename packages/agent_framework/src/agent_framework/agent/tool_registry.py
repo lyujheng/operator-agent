@@ -139,3 +139,19 @@ class ToolRegistry:
 
     def __len__(self) -> int:
         return len(self._tools)
+
+    @classmethod
+    async def from_mcp(cls, server: Any) -> ToolRegistry:
+        """Build a ToolRegistry from a connected MCP server.
+
+        Convenience wrapper around
+        :func:`agent_framework.mcp.converter.create_mcp_tool_registry`.
+
+        Parameters
+        ----------
+        server:
+            A connected :class:`MCPStdioServer` instance.
+        """
+        from agent_framework.mcp.converter import create_mcp_tool_registry
+
+        return await create_mcp_tool_registry(server)

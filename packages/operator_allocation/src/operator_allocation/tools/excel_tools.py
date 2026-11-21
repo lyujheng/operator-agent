@@ -231,38 +231,34 @@ def check_result_excel(
                 "detail": f"operator_lib='{info['operator_lib']}' but in sheet '{info['sheet']}'",
             })
 
-    # Check 3: link_status ids exist in dev table.
+    # Check 3: link_status names exist in dev table.
     dev_path = Path(dev_table_path)
     if dev_path.exists():
         dev_wb = load_workbook(dev_path, read_only=True, data_only=True)
-        dev_ids: dict[str, set[int]] = {}
+        dev_names: dict[str, set[str]] = {}
         for sn in dev_wb.sheetnames:
-            ids: set[int] = set()
+            names: set[str] = set()
             for row in dev_wb[sn].iter_rows(min_row=2, values_only=True):
                 if row and row[0] is not None:
-                    ids.add(int(row[0]))
-            dev_ids[sn] = ids
+                    # Column 0 may be id (legacy) or operator_name — use
+                    # whichever column holds the name string.
+                    name_val = str(row[1] if len(row) > 1 and row[1] else row[0]).strip()
+                    if name_val:
+                        names.add(name_val)
+            dev_names[sn] = names
         dev_wb.close()
 
         for op_name, info in result_ops.items():
             link = info["link_status"]
             if link is None:
                 continue
-            try:
-                link_id = int(link)
-            except (ValueError, TypeError):
-                errors.append({
-                    "type": "invalid_link_id",
-                    "operator_name": op_name,
-                    "detail": f"link_status '{link}' is not a valid integer",
-                })
-                continue
+            link_name = str(link).strip()
             sheet = info["sheet"]
-            if sheet in dev_ids and link_id not in dev_ids[sheet]:
+            if sheet in dev_names and link_name not in dev_names[sheet]:
                 errors.append({
-                    "type": "invalid_link_id",
+                    "type": "invalid_link_name",
                     "operator_name": op_name,
-                    "detail": f"link_status {link_id} not found in dev table sheet '{sheet}'",
+                    "detail": f"link_status '{link_name}' not found in dev table sheet '{sheet}'",
                 })
 
     return {"passed": len(errors) == 0, "errors": errors}

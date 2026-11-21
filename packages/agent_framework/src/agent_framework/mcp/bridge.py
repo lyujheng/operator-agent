@@ -17,9 +17,6 @@ from typing import Any, Callable
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
-    CallToolRequestParams,
-    CallToolResult,
-    ListToolsResult,
     TextContent,
     Tool,
 )
@@ -117,20 +114,20 @@ class MCPBridgeServer:
         schemas = self._tool_schemas
         extra = self.extra_context
 
-        async def handle_list_tools(ctx: Any, params: Any) -> ListToolsResult:
-            return ListToolsResult(tools=schemas)
+        server = Server(self.profile.name)
 
-        async def handle_call_tool(ctx: Any, params: CallToolRequestParams) -> CallToolResult:
-            name = params.name
-            arguments = params.arguments or {}
+        @server.list_tools()
+        async def handle_list_tools() -> list[Tool]:
+            return schemas
+
+        @server.call_tool()
+        async def handle_call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[TextContent]:
+            arguments = dict(arguments) if arguments else {}
 
             func = functions.get(name)
             if func is None:
                 available = ", ".join(functions.keys())
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Error: tool '{name}' not found. Available: {available}")],
-                    is_error=True,
-                )
+                raise ValueError(f"Tool '{name}' not found. Available: {available}")
 
             try:
                 # Inject extra_context fields that match parameter names.
@@ -145,22 +142,11 @@ class MCPBridgeServer:
                     result = func(**arguments)
 
                 text = json.dumps(result, ensure_ascii=False, default=str)
-                return CallToolResult(
-                    content=[TextContent(type="text", text=text)],
-                    is_error=False,
-                )
+                return [TextContent(type="text", text=text)]
             except Exception as exc:
                 logger.error("Tool %s execution error: %s", name, exc, exc_info=True)
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Error: {exc}")],
-                    is_error=True,
-                )
+                raise
 
-        server = Server(
-            self.profile.name,
-            on_list_tools=handle_list_tools,
-            on_call_tool=handle_call_tool,
-        )
         return server
 
     async def run_stdio(self) -> None:

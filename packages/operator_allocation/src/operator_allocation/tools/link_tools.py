@@ -27,21 +27,21 @@ def get_operators() -> list[dict[str, Any]]:
 
 
 def update_operator_field(
-    operator_names: list[str],
+    operators: list[dict[str, Any]],
     field_name: str,
     value: Any,
 ) -> list[dict[str, Any]]:
     """Batch update a field for multiple operators in memory.
 
     Args:
-        operator_names: List of operator_name values to update.
+        operators: List of operator dicts to update (each must contain "operator_name").
         field_name: Field to set (e.g. "operator_lib", "link_status").
         value: Value to assign.
 
     Returns:
         The list of updated operator dicts.
     """
-    name_set = set(operator_names)
+    name_set = {op["operator_name"] for op in operators if "operator_name" in op}
     updated: list[dict[str, Any]] = []
 
     for op in _operators:
@@ -54,28 +54,28 @@ def update_operator_field(
 
 def update_link_status(
     operator_name: str,
-    dev_operator_id: int | None,
+    dev_operator_name: str | None,
 ) -> dict[str, Any]:
     """Set link_status for a single requirement operator.
 
     Args:
-        operator_name: The operator to update.
-        dev_operator_id: The dev table operator id, or None to clear.
+        operator_name: The requirement operator to update.
+        dev_operator_name: The dev table operator name to link, or None to clear.
 
     Returns:
-        {"operator_name": str, "link_status": int | None, "updated": bool}
+        {"operator_name": str, "link_status": str | None, "updated": bool}
     """
     for op in _operators:
         if op.get("operator_name") == operator_name:
-            op["link_status"] = dev_operator_id
+            op["link_status"] = dev_operator_name
             return {
                 "operator_name": operator_name,
-                "link_status": dev_operator_id,
+                "link_status": dev_operator_name,
                 "updated": True,
             }
 
     return {
         "operator_name": operator_name,
-        "link_status": dev_operator_id,
+        "link_status": dev_operator_name,
         "updated": False,
     }

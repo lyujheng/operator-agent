@@ -20,6 +20,7 @@ class LLMSettings(BaseModel):
     model: str = "mco-4"
     timeout: int = 120
     max_retries: int = 3
+    structured_output_mode: str = "openai"  # "openai" | "claude" | "fallback"
 
 
 class RepoSettings(BaseModel):

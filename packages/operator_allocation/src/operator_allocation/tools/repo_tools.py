@@ -64,7 +64,6 @@ def search_file_content(
             "-rin",  # recursive, case-insensitive, line numbers
             "--include",
             file_pattern,
-            "-n",
             keyword,
             str(repo),
         ]

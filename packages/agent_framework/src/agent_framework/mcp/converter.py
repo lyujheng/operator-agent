@@ -6,12 +6,14 @@ function-calling JSON Schema format used by the LLM layer.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from typing import Any
 
 from mcp.types import TextContent, Tool
 
+from agent_framework.agent.tool_registry import ToolRegistry
 from agent_framework.mcp.server import MCPStdioServer
 
 logger = logging.getLogger(__name__)
@@ -84,3 +86,62 @@ async def invoke_mcp_tool(
         return f"Error: {output}"
 
     return output
+
+
+def _make_mcp_proxy(server: MCPStdioServer, tool_name: str) -> Any:
+    """Create an async callable that proxies tool calls through MCP.
+
+    The returned function accepts **kwargs (matching the tool's parameters)
+    and returns the MCP result as a string.
+    """
+
+    async def proxy(**kwargs: Any) -> str:
+        result = await server.call_tool(tool_name, kwargs)
+        parts: list[str] = []
+        for item in result.content:
+            if isinstance(item, TextContent):
+                parts.append(item.text)
+            else:
+                parts.append(f"[{type(item).__name__}]")
+        output = "\n".join(parts) if parts else ""
+        if result.is_error:
+            return f"Error: {output}"
+        return output
+
+    proxy.__name__ = tool_name
+    proxy.__qualname__ = f"mcp_proxy.{tool_name}"
+    return proxy
+
+
+async def create_mcp_tool_registry(server: MCPStdioServer) -> ToolRegistry:
+    """Build a :class:`ToolRegistry` from a connected MCP server.
+
+    Discovers all tools exposed by the server, converts their schemas to
+    OpenAI function-calling format, and creates proxy callables that route
+    invocations through MCP.
+
+    Parameters
+    ----------
+    server:
+        A connected MCPStdioServer (``connect()`` must have been called).
+
+    Returns
+    -------
+    ToolRegistry
+        Registry with MCP-proxied tools ready for use with ReActAgent.
+    """
+    registry = ToolRegistry()
+    tools = await server.list_tools()
+
+    for tool in tools:
+        schema = mcp_tool_to_function_schema(tool)
+        proxy = _make_mcp_proxy(server, tool.name)
+        registry.register(proxy, schema=schema)
+        logger.debug("Registered MCP proxy tool: %s", tool.name)
+
+    logger.info(
+        "Created MCP tool registry with %d tools from %s",
+        len(registry),
+        server.command,
+    )
+    return registry

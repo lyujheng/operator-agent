@@ -10,6 +10,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+from pydantic import BaseModel
+
 from agent_framework.agent.hooks import AgentHooks, HookContext
 from agent_framework.agent.retry import RetryPolicy
 from agent_framework.agent.tool_registry import ToolRegistry
@@ -85,6 +87,7 @@ class BaseAgent(ABC):
         llm_client: LLMClient,
         tools: ToolRegistry,
         *,
+        result_schema: type[BaseModel] | None = None,
         hooks: AgentHooks | None = None,
         retry_policy: RetryPolicy | None = None,
         max_turns: int = 10,
@@ -92,6 +95,7 @@ class BaseAgent(ABC):
         self.name = name
         self.llm_client = llm_client
         self.tools = tools
+        self.result_schema = result_schema
         self.hooks = hooks or AgentHooks()
         self.retry_policy = retry_policy or RetryPolicy()
         self.max_turns = max_turns

@@ -20,11 +20,7 @@ from agent_framework.agent.base import (
     estimate_tokens,
     truncate_tool_result,
 )
-from agent_framework.exceptions import (
-    MaxTurnsExceeded,
-    ToolExecutionError,
-    ToolNotFoundError,
-)
+from agent_framework.exceptions import MaxTurnsExceeded
 from agent_framework.llm.types import Message
 from agent_framework.tracing.context import span
 
@@ -116,6 +112,20 @@ class ReActAgent(BaseAgent):
             # ── no tool_calls → final answer ─────────────────────
             if not response.has_tool_calls:
                 await self.hooks.on_turn_end(ctx)
+                # If a result_schema is configured, extract structured output
+                # instead of returning raw text.
+                if self.result_schema is not None:
+                    history.append(response.message)
+                    structured = await self.llm_client.get_structured_output(
+                        history.messages, self.result_schema,
+                    )
+                    if structured is not None:
+                        return structured
+                    logger.warning(
+                        "[%s] Structured output extraction failed, "
+                        "falling back to raw content",
+                        self.name,
+                    )
                 return response.content
 
             # ── execute tool calls ───────────────────────────────
@@ -137,7 +147,7 @@ class ReActAgent(BaseAgent):
             if self.reflexion_enabled:
                 history.append(
                     Message(
-                        role="system",
+                        role="user",
                         content=(
                             "Review your last tool results. "
                             "Are they correct and complete? "
