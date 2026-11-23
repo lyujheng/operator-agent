@@ -269,6 +269,7 @@ def check_result(
             errors.append({
                 "type": "invalid_link_name",
                 "operator_name": op.get("operator_name", ""),
+                "operator_lib": lib,
                 "detail": f"link_status='{link}' not found in dev table sheet '{lib}'",
             })
 

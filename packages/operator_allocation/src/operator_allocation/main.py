@@ -130,48 +130,122 @@ def load_dev_table_excel(path: str) -> dict[str, list[dict[str, Any]]]:
 def write_result_excel(
     result: dict[str, Any],
     output_path: str,
+    original_dev_table: dict[str, list[dict[str, Any]]] | None = None,
 ) -> str:
     """Write result data back to Excel format.
 
-    Takes the orchestrator's result dict and produces a multi-sheet
-    Excel file grouped by operator_lib.
+    Output structure (per requirement doc):
+      - sheet「已识别」: identified operators (operator_lib != unrecognized)
+      - sheet「未识别」: unrecognized operators
+      - sheet「FlagGems」/「FlagGems-vllm」/「FlagGems-sglang」:
+        original dev table + new dev entries from dev_table_updates
     """
     from openpyxl import Workbook
-
-    from operator_allocation.tools.excel_tools import VALID_LIBS
 
     wb = Workbook()
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
 
     req_result = result.get("requirement_result", [])
+    dev_table_updates = result.get("dev_table_updates", {})
 
-    # Group by operator_lib.
-    groups: dict[str, list[dict[str, Any]]] = {lib: [] for lib in VALID_LIBS}
-    for op in req_result:
-        lib = op.get("operator_lib", "unrecognized")
-        if lib not in VALID_LIBS:
-            lib = "unrecognized"
-        groups[lib].append(op)
+    # ── Sheet「已识别」: identified requirement operators ──
+    identified = [op for op in req_result if op.get("operator_lib") != "unrecognized"]
+    ws_id = wb.create_sheet("已识别")
+    ws_id.append(["operator_name", "priority", "reference_impl", "operator_lib", "link_status"])
+    for op in identified:
+        ws_id.append([
+            op.get("operator_name", ""),
+            op.get("priority", ""),
+            op.get("reference_impl", ""),
+            op.get("operator_lib", ""),
+            op.get("link_status"),
+        ])
 
-    header = ["operator_name", "priority", "reference_impl", "operator_lib", "link_status"]
-    for lib_name in ["FlagGems", "FlagGems-vllm", "FlagGems-sglang", "unrecognized"]:
+    # ── Sheet「未识别」: unrecognized operators ──
+    unrecognized = [op for op in req_result if op.get("operator_lib") == "unrecognized"]
+    ws_un = wb.create_sheet("未识别")
+    ws_un.append(["operator_name", "priority", "reference_impl"])
+    for op in unrecognized:
+        ws_un.append([
+            op.get("operator_name", ""),
+            op.get("priority", ""),
+            op.get("reference_impl", ""),
+        ])
+
+    # ── Dev table sheets: original + new entries per lib ──
+    orig = original_dev_table or {}
+    for lib_name in ["FlagGems", "FlagGems-vllm", "FlagGems-sglang"]:
         ws = wb.create_sheet(lib_name)
-        ws.append(header)
-        for op in groups[lib_name]:
+        ws.append(["operator_name", "status"])
+
+        # Original entries.
+        for op in orig.get(lib_name, []):
             ws.append([
                 op.get("operator_name", ""),
-                op.get("priority", ""),
-                op.get("reference_impl", ""),
-                op.get("operator_lib", lib_name),
-                op.get("link_status"),
+                op.get("status", "not_developed"),
+            ])
+
+        # New entries from dev_table_updates.
+        new_ops = dev_table_updates.get(lib_name, [])
+        for op in new_ops:
+            ws.append([
+                op.get("operator_name", ""),
+                op.get("status", "not_developed"),
             ])
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
     wb.close()
 
-    logger.info("Result Excel written to %s (%d operators)", output_path, len(req_result))
+    new_count = sum(len(ops) for ops in dev_table_updates.values())
+    logger.info(
+        "Result Excel written to %s (%d identified, %d unrecognized, %d new dev)",
+        output_path, len(identified), len(unrecognized), new_count,
+    )
+    return output_path
+
+
+def write_dev_table_updates_excel(
+    result: dict[str, Any],
+    output_path: str,
+) -> str:
+    """Write dev_table_updates to a separate Excel file.
+
+    Only sheets with new entries are included. If no new entries exist,
+    the file is still written with an empty structure.
+    """
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    if "Sheet" in wb.sheetnames:
+        del wb["Sheet"]
+
+    dev_table_updates = result.get("dev_table_updates", {})
+
+    for lib_name in ["FlagGems", "FlagGems-vllm", "FlagGems-sglang"]:
+        new_ops = dev_table_updates.get(lib_name, [])
+        if not new_ops:
+            continue
+        ws = wb.create_sheet(lib_name)
+        ws.append(["operator_name", "status"])
+        for op in new_ops:
+            ws.append([
+                op.get("operator_name", ""),
+                op.get("status", "not_developed"),
+            ])
+
+    # Ensure at least one sheet exists (openpyxl requires it).
+    if not wb.sheetnames:
+        ws = wb.create_sheet("无新增")
+        ws.append(["(无新增开发算子)"])
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_path)
+    wb.close()
+
+    total = sum(len(ops) for ops in dev_table_updates.values())
+    logger.info("Dev table updates Excel written to %s (%d new entries)", output_path, total)
     return output_path
 
 
@@ -201,10 +275,15 @@ async def async_main(
 
     # Write result Excel from in-memory data.
     result_excel_path = str(output_dir / "result.xlsx")
-    write_result_excel(result, result_excel_path)
+    write_result_excel(result, result_excel_path, original_dev_table=dev_table)
+
+    # Write dev_table_updates Excel (incremental only).
+    dev_updates_path = str(output_dir / "dev_table_updates.xlsx")
+    write_dev_table_updates_excel(result, dev_updates_path)
 
     # Print summary.
     stats = result.get("statistics", {})
+    dev_updates = result.get("dev_table_updates", {})
     print("\n" + "=" * 60)
     print("处理完成")
     print("=" * 60)
@@ -212,12 +291,18 @@ async def async_main(
     print(f"  已识别: {stats.get('identified', '?')}")
     print(f"  已关联: {stats.get('linked', '?')}")
     print(f"  新增开发算子: {stats.get('new_dev_added', '?')}")
+    if dev_updates:
+        for lib_name, new_ops in dev_updates.items():
+            if new_ops:
+                names = ", ".join(op.get("operator_name", "?") for op in new_ops)
+                print(f"    - {lib_name}: {names}")
     print(f"  未识别: {stats.get('unrecognized', '?')}")
     if stats.get("warnings"):
         print(f"  警告: {len(stats['warnings'])} 条")
     if stats.get("unresolved_errors"):
         print(f"  未解决错误: {len(stats['unresolved_errors'])} 条")
     print(f"  结果文件: {result_excel_path}")
+    print(f"  增量更新: {dev_updates_path}")
     print(f"  Trace 日志: {trace_path}")
     print("=" * 60)
 

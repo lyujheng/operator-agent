@@ -230,8 +230,8 @@ class AgentOrchestrator:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
         self._operators: list[dict[str, Any]] = []
-        self._dev_table: dict[str, list[dict[str, Any]]] = {}
-        self._original_dev_table: dict[str, list[dict[str, Any]]] = {}
+        self._dev_table: dict[str, list[dict[str, Any]]] = {}  # read-only after init
+        self._new_dev_entries: dict[str, list[dict[str, Any]]] = {}  # new memory for additions
         self._temp_files: list[str] = []
         self._format_result_cache: dict[str, Any] | None = None
 
@@ -265,11 +265,7 @@ class AgentOrchestrator:
             sheet: [dict(row) for row in rows]
             for sheet, rows in dev_table.items()
         }
-        # Keep a deep copy of the original dev table for diff later.
-        self._original_dev_table = {
-            sheet: [dict(row) for row in rows]
-            for sheet, rows in dev_table.items()
-        }
+        self._new_dev_entries = {}  # reset per run
 
         logger.info("Starting allocation with %d operators", len(self._operators))
         set_operators(self._operators)
@@ -386,13 +382,37 @@ class AgentOrchestrator:
         req_result = self._format_result_cache.get("requirement_result", self._operators)
         dev_updates = self._format_result_cache.get("dev_table_updates", {})
 
-        check = check_result(req_result, self._original_dev_table, dev_updates)
+        check = check_result(req_result, self._dev_table, dev_updates)
 
         if not check["passed"]:
             # Apply degradation strategies.
+            prev_errors = check.get("errors", [])
             check = self._apply_degradation(check, req_result, dev_updates)
 
+            # Convergence detection (D8): if recheck errors are identical
+            # to pre-degradation errors, the strategy cannot fix them.
+            # Mark as resolved to stop pointless retries.
+            post_errors = check.get("errors", [])
+            if not check["passed"] and self._errors_identical(prev_errors, post_errors):
+                logger.warning(
+                    "Degradation did not reduce errors (%d remaining), "
+                    "marking as converged to stop retries",
+                    len(post_errors),
+                )
+                if self._format_result_cache:
+                    stat = self._format_result_cache.get("statistics", {})
+                    stat["unresolved_errors"] = post_errors
+                check["passed"] = True  # stop retry loop
+
         return check
+
+    @staticmethod
+    def _errors_identical(a: list[dict], b: list[dict]) -> bool:
+        """Check whether two error lists represent the same set of issues."""
+        if len(a) != len(b):
+            return False
+        key = lambda e: (e.get("type", ""), e.get("operator_name", ""), e.get("operator_lib", ""))
+        return sorted(a, key=key) == sorted(b, key=key)
 
     # ── Degradation Strategy ────────────────────────────────────
 
@@ -429,7 +449,15 @@ class AgentOrchestrator:
                     warnings.append(f"lib_mismatch '{op_name}': moved to unrecognized")
 
             elif err_type == "invalid_link_name":
-                op = next((o for o in req_result if o.get("operator_name") == op_name), None)
+                # D7: use (operator_name, operator_lib) for matching to handle
+                # duplicate operator names across different libs.
+                err_lib = error.get("operator_lib", "")
+                op = next(
+                    (o for o in req_result
+                     if o.get("operator_name") == op_name
+                     and (not err_lib or o.get("operator_lib") == err_lib)),
+                    None,
+                )
                 if op:
                     op["link_status"] = None
                     op["operator_lib"] = "unrecognized"
@@ -468,7 +496,7 @@ class AgentOrchestrator:
             stat.setdefault("warnings", []).extend(warnings)
 
         # Re-run check_result to confirm no residual errors.
-        recheck = check_result(req_result, self._original_dev_table, dev_updates)
+        recheck = check_result(req_result, self._dev_table, dev_updates)
         if not recheck["passed"]:
             # Record unresolved errors.
             if self._format_result_cache:
@@ -484,20 +512,12 @@ class AgentOrchestrator:
     # ── Dev Table Updates Diff ──────────────────────────────────
 
     def _compute_dev_table_updates(self) -> dict[str, list[dict[str, Any]]]:
-        """Diff current dev table state vs original to find new operators."""
-        updates: dict[str, list[dict[str, Any]]] = {}
-        for sheet_name, current_ops in self._dev_table.items():
-            original_names = {
-                op.get("operator_name", "")
-                for op in self._original_dev_table.get(sheet_name, [])
-            }
-            new_ops = [
-                op for op in current_ops
-                if op.get("operator_name", "") not in original_names
-            ]
-            if new_ops:
-                updates[sheet_name] = new_ops
-        return updates
+        """Return new dev entries accumulated during dispatch.
+
+        dev_table is read-only; new entries are tracked separately in
+        ``self._new_dev_entries`` and returned as-is here.
+        """
+        return dict(self._new_dev_entries)
 
     # ── MCP Server Management ───────────────────────────────────
 
@@ -736,7 +756,7 @@ class AgentOrchestrator:
                 task = asyncio.create_task(
                     self._dispatch_single_lib(
                         lib, ops,
-                        self._original_dev_table.get(lib, []),
+                        self._dev_table.get(lib, []),
                         self.settings.repo_lib_mapping.get(lib, ""),
                         llm_client,
                     )
@@ -837,13 +857,21 @@ class AgentOrchestrator:
                     # Write back link_status from structured result (O3).
                     if isinstance(result, dict):
                         op["link_status"] = result.get("link_status")
-                        # Track newly added dev operators.
-                        new_dev = result.get("new_dev_operator")
-                        if new_dev:
-                            dev_ops.append(new_dev)
                     else:
                         # Fallback: try to extract from text.
                         self._extract_link_from_answer(op, str(result), dev_ops)
+
+                    # Derive new dev entries from link_status (D3).
+                    # If link_status points to a name not in original dev_table
+                    # or already-accumulated new_dev_entries, record it.
+                    link = op.get("link_status")
+                    if link and sheet_name in REPO_LIBS:
+                        existing = {o["operator_name"] for o in self._dev_table.get(sheet_name, [])}
+                        existing |= {o["operator_name"] for o in self._new_dev_entries.get(sheet_name, [])}
+                        if link not in existing:
+                            new_entry = {"operator_name": link, "status": "not_developed"}
+                            self._new_dev_entries.setdefault(sheet_name, []).append(new_entry)
+                            dev_ops.append(new_entry)
 
                     results.append(result)
 
