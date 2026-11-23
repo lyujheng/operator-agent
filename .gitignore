@@ -5,6 +5,9 @@ dev-plan.html
 ISSUES.md
 config.local.toml
 
+# --- Business data (local only) ---
+data/
+
 # --- Repos (local clones for agent tools) ---
 repo/
 

@@ -123,7 +123,7 @@ async def create_mcp_tool_registry(server: MCPStdioServer) -> ToolRegistry:
     Parameters
     ----------
     server:
-        A connected MCPStdioServer (``connect()`` must have been called).
+        A connected MCPStdioServer (must be used inside an ``async with`` block).
 
     Returns
     -------

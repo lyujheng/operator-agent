@@ -13,8 +13,9 @@ import logging
 import sys
 import tempfile
 from collections import Counter
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from agent_framework.agent.plan_solve import PlanSolveAgent
 from agent_framework.agent.plan_types import (
@@ -231,7 +232,6 @@ class AgentOrchestrator:
         self._operators: list[dict[str, Any]] = []
         self._dev_table: dict[str, list[dict[str, Any]]] = {}
         self._original_dev_table: dict[str, list[dict[str, Any]]] = {}
-        self._sub_agents: dict[str, MCPStdioServer] = {}
         self._temp_files: list[str] = []
         self._format_result_cache: dict[str, Any] | None = None
 
@@ -345,7 +345,6 @@ class AgentOrchestrator:
             return result
         finally:
             await llm_client.close()
-            await self._cleanup_sub_agents()
             self._cleanup_temp_files()
 
     # ── Step Executors ───────────────────────────────────────────
@@ -502,22 +501,24 @@ class AgentOrchestrator:
 
     # ── MCP Server Management ───────────────────────────────────
 
-    async def _spawn_mcp_server(
+    @asynccontextmanager
+    async def _mcp_server(
         self,
-        name: str,
         profile: str,
         *,
         repo_path: str = "",
         sheet_name: str = "",
         dev_data: list[dict[str, Any]] | None = None,
         operators_data: list[dict[str, Any]] | None = None,
-    ) -> MCPStdioServer:
-        """Spawn an MCP bridge server subprocess and connect.
+    ) -> AsyncIterator[MCPStdioServer]:
+        """Spawn an MCP bridge server subprocess as an async context manager.
+
+        The server's lifetime is bound to the ``async with`` block,
+        ensuring that anyio cancel scopes are entered and exited in the
+        same task in stack order.
 
         Parameters
         ----------
-        name:
-            Identifier for tracking / cleanup.
         profile:
             Tool profile name (e.g. "identify_server", "process_server").
         repo_path:
@@ -550,11 +551,11 @@ class AgentOrchestrator:
             command=sys.executable,
             args=args,
         )
-        await server.connect()
-        self._sub_agents[name] = server
 
-        logger.info("Spawned MCP server '%s' (profile=%s)", name, profile)
-        return server
+        async with server:
+            logger.info("Spawned MCP server (profile=%s)", profile)
+            yield server
+        logger.debug("MCP server shut down (profile=%s)", profile)
 
     def _write_temp_json(self, data: Any) -> str:
         """Write data to a temp JSON file for subprocess state injection."""
@@ -605,36 +606,35 @@ class AgentOrchestrator:
                 structured_output_mode=self.settings.llm.structured_output_mode,
             )
 
-            # Spawn identify MCP server subprocess.
-            server = await self._spawn_mcp_server(
-                "identify",
-                "identify_server",
-                operators_data=self._operators,
-            )
-            identify_tools = await ToolRegistry.from_mcp(server)
-
             try:
-                for op in unparsed:
-                    with span(
-                        f"identify_{op['operator_name']}",
-                        span_type="agent",
-                        agent_name="identify_agent",
-                    ):
-                        try:
-                            result = await self._identify_single_operator(
-                                op, llm_client, identify_tools
-                            )
-                            op["operator_lib"] = result
-                        except Exception as exc:
-                            logger.warning(
-                                "Identify failed for '%s': %s, marking unrecognized",
-                                op["operator_name"],
-                                exc,
-                            )
-                            op["operator_lib"] = "unrecognized"
+                # Spawn identify MCP server — lifetime bound to this block.
+                async with self._mcp_server(
+                    "identify_server",
+                    operators_data=self._operators,
+                ) as server:
+                    identify_tools = await ToolRegistry.from_mcp(server)
+
+                    for op in unparsed:
+                        with span(
+                            f"identify_{op['operator_name']}",
+                            span_type="agent",
+                            agent_name="identify_agent",
+                        ):
+                            try:
+                                result = await self._identify_single_operator(
+                                    op, llm_client, identify_tools
+                                )
+                                op["operator_lib"] = result
+                            except Exception as exc:
+                                logger.warning(
+                                    "Identify failed for '%s': %s, marking unrecognized",
+                                    op["operator_name"],
+                                    exc,
+                                )
+                                op["operator_lib"] = "unrecognized"
+                # Server automatically cleaned up here.
             finally:
                 await llm_client.close()
-                await self._cleanup_server("identify")
 
         return self._operators
 
@@ -718,9 +718,6 @@ class AgentOrchestrator:
 
         logger.info("Dispatch groups: %s", {k: len(v) for k, v in groups.items()})
 
-        # Create sub-agents for all groups.
-        await self._create_sub_agents(list(groups.keys()), groups)
-
         # Process each group with a dedicated MCP subprocess + ReAct agent.
         llm_client = LLMClient(
             base_url=self.settings.llm.base_url,
@@ -732,16 +729,13 @@ class AgentOrchestrator:
         )
 
         try:
+            # Each _dispatch_single_lib spawns its own MCP server via
+            # async with, so we can run them concurrently.
             tasks = []
             for lib, ops in groups.items():
-                server_name = f"process_{lib}"
-                server = self._sub_agents.get(server_name)
-                if server is None:
-                    logger.warning("No MCP server for lib=%s, skipping", lib)
-                    continue
                 task = asyncio.create_task(
-                    self._process_operators_for_lib(
-                        server, lib, ops,
+                    self._dispatch_single_lib(
+                        lib, ops,
                         self._original_dev_table.get(lib, []),
                         self.settings.repo_lib_mapping.get(lib, ""),
                         llm_client,
@@ -756,30 +750,29 @@ class AgentOrchestrator:
 
         return self._operators
 
-    async def _create_sub_agents(
+    async def _dispatch_single_lib(
         self,
-        operator_libs: list[str],
-        operators_by_lib: dict[str, list[dict[str, Any]]],
-    ) -> None:
-        """Create MCP subprocess servers for each operator_lib group.
+        lib: str,
+        operators: list[dict[str, Any]],
+        original_dev_ops: list[dict[str, Any]],
+        repo_path: str,
+        llm_client: LLMClient,
+    ) -> list[Any]:
+        """Spawn an MCP server for one lib and process all its operators.
 
-        Passes both dev table data and requirement operators to each subprocess.
+        The server lifetime is bound to the ``async with`` block — it is
+        automatically cleaned up when the block exits.
         """
-        for lib in operator_libs:
-            server_name = f"process_{lib}"
-            if server_name in self._sub_agents:
-                continue  # Already running from a previous retry.
-
-            repo_path = self.settings.repo_lib_mapping.get(lib, "")
-            sheet_name = lib
-
-            await self._spawn_mcp_server(
-                server_name,
-                "process_server",
-                repo_path=repo_path,
-                sheet_name=sheet_name,
-                dev_data=self._dev_table.get(lib, []),
-                operators_data=operators_by_lib.get(lib, []),
+        async with self._mcp_server(
+            "process_server",
+            repo_path=repo_path,
+            sheet_name=lib,
+            dev_data=self._dev_table.get(lib, []),
+            operators_data=[op for op in self._operators if op.get("operator_lib") == lib],
+        ) as server:
+            return await self._process_operators_for_lib(
+                server, lib, operators,
+                original_dev_ops, repo_path, llm_client,
             )
 
     async def _process_operators_for_lib(
@@ -864,8 +857,7 @@ class AgentOrchestrator:
                     # O8: Preserve original operator_lib on failure, only clear link_status.
                     op["link_status"] = None
 
-        # NOTE: process servers stay alive until flow ends (requirement:
-        # all sub-agents live until cleanup).
+        # Server lifetime is managed by the caller's async with block.
         return results
 
     @staticmethod
@@ -892,21 +884,6 @@ class AgentOrchestrator:
             pass
 
     # ── Cleanup ──────────────────────────────────────────────────
-
-    async def _cleanup_server(self, name: str) -> None:
-        """Shut down a single MCP sub-agent process by name."""
-        server = self._sub_agents.pop(name, None)
-        if server is not None:
-            try:
-                await server.cleanup()
-                logger.debug("Cleaned up MCP server: %s", name)
-            except Exception as exc:
-                logger.debug("Cleanup error for %s: %s", name, exc)
-
-    async def _cleanup_sub_agents(self) -> None:
-        """Shut down all remaining MCP sub-agent processes."""
-        for name in list(self._sub_agents.keys()):
-            await self._cleanup_server(name)
 
     def _cleanup_temp_files(self) -> None:
         """Remove temp files created for subprocess state."""

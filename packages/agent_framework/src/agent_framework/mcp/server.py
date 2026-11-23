@@ -2,6 +2,18 @@
 
 Manages a child process running an MCP server, communicating via
 stdin/stdout JSON-RPC through the official ``mcp`` SDK.
+
+Lifecycle is managed as an async context manager::
+
+    async with MCPStdioServer(command="python", args=[...]) as server:
+        tools = await server.list_tools()
+        result = await server.call_tool("my_tool", {"arg": "value"})
+    # server and child process are cleaned up here
+
+The ``__aenter__``/``__aexit__`` pair ensures that the underlying
+anyio cancel scopes created by ``stdio_client`` are entered and exited
+in the same task, in stack (LIFO) order — a constraint that the
+previous ``connect()``/``cleanup()`` split could violate.
 """
 
 from __future__ import annotations
@@ -32,8 +44,16 @@ class MCPStdioServer:
     """Wraps a single MCP server subprocess.
 
     Uses ``mcp.client.stdio.stdio_client`` to spawn the child process and
-    communicate over stdin/stdout JSON-RPC.  Lifecycle is managed via an
-    :class:`asyncio.ExitStack`.
+    communicate over stdin/stdout JSON-RPC.
+
+    **Preferred usage** — async context manager::
+
+        async with MCPStdioServer(command="python", args=[...]) as server:
+            await server.list_tools()
+
+    This guarantees that the ``AsyncExitStack`` driving ``stdio_client``
+    and ``ClientSession`` is entered and exited by the same ``async with``
+    block in the same task, satisfying anyio's cancel-scope constraint.
 
     Parameters
     ----------
@@ -64,9 +84,9 @@ class MCPStdioServer:
         self._session: ClientSession | None = None
         self._tools_cache: list[Tool] | None = None
 
-    # ── lifecycle ────────────────────────────────────────────────
+    # ── async context manager (preferred API) ────────────────────
 
-    async def connect(self) -> None:
+    async def __aenter__(self) -> MCPStdioServer:
         """Start the child process, open the MCP session, and initialise.
 
         Raises :class:`MCPConnectionError` on any failure and guarantees
@@ -97,8 +117,13 @@ class MCPStdioServer:
                 self.command,
                 " ".join(self.args),
             )
+            return self
         except Exception as exc:
-            await self.cleanup()
+            # Clean up partially-acquired resources.
+            if self._exit_stack is not None:
+                await self._exit_stack.__aexit__(type(exc), exc, exc.__traceback__)
+                self._exit_stack = None
+            self._session = None
             raise MCPConnectionError(
                 f"Failed to connect MCP server ({self.command}): {exc}",
                 context={
@@ -107,26 +132,13 @@ class MCPStdioServer:
                 },
             ) from exc
 
-    async def cleanup(self) -> None:
-        """Close the session and terminate the child process.
-
-        Safe to call multiple times; errors are logged, not raised.
-        """
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[type-arg]
+        """Shut down the session and terminate the child process."""
         self._session = None
         self._tools_cache = None
         if self._exit_stack is not None:
             try:
-                await self._exit_stack.aclose()
-            except (Exception, BaseExceptionGroup):
-                # MCP SDK 2.x + anyio may raise RuntimeError or
-                # ExceptionGroup when cancel scopes are exited from a
-                # different task context during shutdown.  This is
-                # harmless — the child process is already gone.
-                logger.debug(
-                    "Error during cleanup of MCP server %s",
-                    self.command,
-                    exc_info=True,
-                )
+                await self._exit_stack.__aexit__(exc_type, exc_val, exc_tb)
             finally:
                 self._exit_stack = None
 
@@ -205,6 +217,6 @@ class MCPStdioServer:
     def _ensure_connected(self) -> None:
         if self._session is None:
             raise MCPConnectionError(
-                "MCPStdioServer is not connected — call connect() first",
+                "MCPStdioServer is not connected — use 'async with' to manage lifecycle",
                 context={"command": self.command},
             )
