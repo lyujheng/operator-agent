@@ -17,6 +17,10 @@ from typing import Any, Callable
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
     TextContent,
     Tool,
 )
@@ -116,13 +120,12 @@ class MCPBridgeServer:
 
         server = Server(self.profile.name)
 
-        @server.list_tools()
-        async def handle_list_tools() -> list[Tool]:
-            return schemas
+        async def handle_list_tools(_ctx: Any, _params: Any) -> ListToolsResult:
+            return ListToolsResult(tools=schemas)
 
-        @server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[TextContent]:
-            arguments = dict(arguments) if arguments else {}
+        async def handle_call_tool(_ctx: Any, params: Any) -> CallToolResult:
+            name = params.name
+            arguments = dict(params.arguments) if params.arguments else {}
 
             func = functions.get(name)
             if func is None:
@@ -142,10 +145,13 @@ class MCPBridgeServer:
                     result = func(**arguments)
 
                 text = json.dumps(result, ensure_ascii=False, default=str)
-                return [TextContent(type="text", text=text)]
+                return CallToolResult(content=[TextContent(type="text", text=text)])
             except Exception as exc:
                 logger.error("Tool %s execution error: %s", name, exc, exc_info=True)
                 raise
+
+        server.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)
+        server.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)
 
         return server
 

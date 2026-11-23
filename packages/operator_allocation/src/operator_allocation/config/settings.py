@@ -75,13 +75,18 @@ class AppSettings(BaseSettings):
     excel: ExcelSettings = Field(default_factory=ExcelSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
 
-    model_config = {
-        "toml_file": "config.toml",
-    }
+    model_config = {}  # loaded via classmethod, not pydantic-settings sources
 
     @classmethod
     def load(cls, config_path: str | Path) -> AppSettings:
-        """Load settings from a specific TOML file path."""
+        """Load settings from a specific TOML file path.
+
+        After loading the TOML, applies environment variable overrides:
+          - ``LLM_API_KEY`` → ``llm.api_key``
+          - ``LLM_BASE_URL`` → ``llm.base_url``
+          - ``LLM_MODEL`` → ``llm.model``
+        """
+        import os
         import tomllib
 
         path = Path(config_path)
@@ -91,7 +96,17 @@ class AppSettings(BaseSettings):
         with open(path, "rb") as f:
             data = tomllib.load(f)
 
-        return cls(**data)
+        settings = cls(**data)
+
+        # Environment variable overrides.
+        if env_key := os.environ.get("LLM_API_KEY"):
+            settings.llm.api_key = env_key
+        if env_url := os.environ.get("LLM_BASE_URL"):
+            settings.llm.base_url = env_url
+        if env_model := os.environ.get("LLM_MODEL"):
+            settings.llm.model = env_model
+
+        return settings
 
     @property
     def repo_lib_mapping(self) -> dict[str, str]:

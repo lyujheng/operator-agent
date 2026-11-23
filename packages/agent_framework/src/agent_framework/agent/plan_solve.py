@@ -150,14 +150,14 @@ class PlanSolveAgent(BaseAgent):
 
     async def _generate_plan(self, history: MessageHistory) -> ExecutionPlan:
         """Ask the LLM to produce an ExecutionPlan."""
-        with span("plan_generation", span_type="llm_call", agent_name=self.name):
+        with span("plan_generation", span_type="llm_call", agent_name=self.name) as s:
             planning_msg = Message(
                 role="system",
                 content=(
                     "Analyze the input and create a step-by-step execution plan. "
                     "Return a JSON object with a 'steps' array. Each step has: "
                     "step_name, description, agent_type, expected_criteria, depends_on (list of step_names). "
-                    "Available step types: operator_identify, task_dispatch, output_result, check_result."
+                    "Available step types: operator_identify, task_dispatch, format_result, check_result."
                 ),
             )
             history.append(planning_msg)
@@ -166,12 +166,24 @@ class PlanSolveAgent(BaseAgent):
             content = response.content or ""
             history.append(response.message)
 
-        # Try to parse the plan from LLM output.
-        plan = self._parse_plan(content)
-        if not plan.steps:
-            # Use a default plan if LLM didn't produce one.
-            plan = self._default_plan()
-            logger.warning("LLM plan was empty; using default plan")
+            # Try to parse the plan from LLM output.
+            plan = self._parse_plan(content)
+            plan_source = "llm"
+            if not plan.steps:
+                plan = self._default_plan()
+                plan_source = "default"
+                logger.warning("LLM plan was empty; using default plan")
+
+            s.output_data = {
+                "content_preview": content[:500],
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                },
+                "plan_steps": [step.step_name for step in plan.steps],
+                "plan_source": plan_source,
+            }
+
         return plan
 
     def _parse_plan(self, content: str) -> ExecutionPlan:
@@ -220,10 +232,10 @@ class PlanSolveAgent(BaseAgent):
                     depends_on=["operator_identify"],
                 ),
                 PlanStep(
-                    step_name="output_result",
-                    description="生成按 operator_lib 分组的结果 Excel",
+                    step_name="format_result",
+                    description="整理结果数据并生成统计信息",
                     agent_type="result",
-                    expected_criteria="result_excel 文件已生成且包含所有算子",
+                    expected_criteria="statistics 内部一致性通过",
                     depends_on=["task_dispatch"],
                 ),
                 PlanStep(
@@ -231,7 +243,7 @@ class PlanSolveAgent(BaseAgent):
                     description="校验结果完整性和正确性",
                     agent_type="result",
                     expected_criteria="所有校验通过: 算子完整、lib 匹配 sheet、link_id 有效",
-                    depends_on=["output_result"],
+                    depends_on=["format_result"],
                 ),
             ]
         )
@@ -296,6 +308,10 @@ class PlanSolveAgent(BaseAgent):
                         )
                         return result
                     else:
+                        s.output_data = {
+                            "passed": False,
+                            "summary": result.summary,
+                        }
                         logger.warning(
                             "[%s] Step '%s' retry %d/%d: criteria not met",
                             self.name,
@@ -358,20 +374,38 @@ class PlanSolveAgent(BaseAgent):
             f"Answer with a JSON: {{\"passed\": true/false, \"reason\": \"...\"}}"
         )
         history.append(Message(role="user", content=validation_prompt))
-        response = await self.llm_client.chat_completions(history.messages)
-        history.append(response.message)
 
-        content = response.content or ""
-        try:
-            # Try to parse structured response.
-            text = content.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
-                text = "\n".join(lines)
-            parsed = json.loads(text)
-            return bool(parsed.get("passed", False))
-        except (json.JSONDecodeError, AttributeError):
-            # If parsing fails, check for affirmative keywords.
-            lower = content.lower()
-            return "true" in lower or "passed" in lower or "yes" in lower
+        with span(
+            f"validate_{step.step_name}",
+            span_type="llm_call",
+            agent_name=self.name,
+        ) as vs:
+            response = await self.llm_client.chat_completions(history.messages)
+            history.append(response.message)
+
+            content = response.content or ""
+            passed = False
+            reason = ""
+            try:
+                # Try to parse structured response.
+                text = content.strip()
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    lines = [l for l in lines if not l.strip().startswith("```")]
+                    text = "\n".join(lines)
+                parsed = json.loads(text)
+                passed = bool(parsed.get("passed", False))
+                reason = parsed.get("reason", "")
+            except (json.JSONDecodeError, AttributeError):
+                # If parsing fails, check for affirmative keywords.
+                lower = content.lower()
+                passed = "true" in lower or "passed" in lower or "yes" in lower
+                reason = content[:200]
+
+            vs.output_data = {
+                "step": step.step_name,
+                "passed": passed,
+                "reason": reason[:300],
+                "content_preview": content[:300],
+            }
+            return passed

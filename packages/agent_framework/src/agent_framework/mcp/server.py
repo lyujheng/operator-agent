@@ -117,7 +117,11 @@ class MCPStdioServer:
         if self._exit_stack is not None:
             try:
                 await self._exit_stack.aclose()
-            except Exception:
+            except (Exception, BaseExceptionGroup):
+                # MCP SDK 2.x + anyio may raise RuntimeError or
+                # ExceptionGroup when cancel scopes are exited from a
+                # different task context during shutdown.  This is
+                # harmless — the child process is already gone.
                 logger.debug(
                     "Error during cleanup of MCP server %s",
                     self.command,

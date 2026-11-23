@@ -22,6 +22,25 @@ from agent_framework.llm.types import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_json_content(content: str) -> dict[str, Any]:
+    """Parse JSON from LLM content, stripping markdown code fences if present.
+
+    Many API proxies (especially Claude-behind-OpenAI) return JSON wrapped
+    in ````` ```json ... ``` ````` even when ``response_format`` is set.
+    This helper handles both raw JSON and fenced JSON.
+
+    Raises ``json.JSONDecodeError`` if no valid JSON can be extracted.
+    """
+    text = content.strip()
+    # Strip markdown code fences: ```json ... ``` or ``` ... ```
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Drop first line (```json or ```) and last line (```)
+        lines = [line for line in lines[1:] if not line.strip() == "```"]
+        text = "\n".join(lines).strip()
+    return json.loads(text)
+
+
 class LLMClient:
     """Async client for OpenAI-compatible ``/chat/completions`` endpoints.
 
@@ -180,12 +199,17 @@ class LLMClient:
 
         Returns a dict matching *schema*, or None on failure.
         """
+        result: dict[str, Any] | None = None
         if self.structured_output_mode == "openai":
-            return await self._openai_structured(messages, schema)
+            result = await self._openai_structured(messages, schema)
         elif self.structured_output_mode == "claude":
-            return await self._claude_structured(messages, schema)
-        else:
-            return self._extract_from_history(messages, schema)
+            result = await self._claude_structured(messages, schema)
+
+        if result is not None:
+            return result
+
+        # Fallback: extract from conversation history (no extra LLM call).
+        return self._extract_from_history(messages, schema)
 
     async def _openai_structured(
         self,
@@ -221,7 +245,7 @@ class LLMClient:
                 max_retries=self.max_retries,
             )
             content = raw["choices"][0]["message"].get("content", "")
-            return json.loads(content)
+            return _parse_json_content(content)
         except Exception:
             logger.warning("OpenAI structured output extraction failed", exc_info=True)
             return None
@@ -257,7 +281,7 @@ class LLMClient:
                 max_retries=self.max_retries,
             )
             content = raw["choices"][0]["message"].get("content", "")
-            return json.loads(content)
+            return _parse_json_content(content)
         except Exception:
             logger.warning("Claude structured output extraction failed", exc_info=True)
             return None

@@ -3,6 +3,10 @@ requirement_allocation.md
 TODO.md
 dev-plan.html
 ISSUES.md
+config.local.toml
+
+# --- Repos (local clones for agent tools) ---
+repo/
 
 # --- Python ---
 __pycache__/

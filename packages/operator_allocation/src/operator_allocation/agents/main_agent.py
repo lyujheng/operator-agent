@@ -142,17 +142,21 @@ class DispatchStepSummarizer(StepResultSummarizer):
     def summarize(self, step: PlanStep, result: Any) -> dict[str, Any]:
         if not isinstance(result, list):
             return {"step": step.step_name, "data": str(result)[:500]}
-        total = len(result)
-        linked = sum(1 for op in result if op.get("link_status") is not None)
-        new_added = sum(1 for op in result if op.get("_newly_added", False))
+        # Only count operators that were dispatched (exclude unrecognized).
+        dispatched = [op for op in result if op.get("operator_lib") in REPO_LIBS]
+        total = len(dispatched)
+        linked = sum(1 for op in dispatched if op.get("link_status") is not None)
+        new_added = sum(1 for op in dispatched if op.get("_newly_added", False))
         failed = total - linked
+        skipped = len(result) - total
         return {
             "total": total,
             "linked": linked,
             "new_added": new_added,
             "failed": failed,
+            "skipped_unrecognized": skipped,
             "failed_operator_names": [
-                op["operator_name"] for op in result if op.get("link_status") is None
+                op["operator_name"] for op in dispatched if op.get("link_status") is None
             ],
         }
 
@@ -309,6 +313,35 @@ class AgentOrchestrator:
                 f"共 {len(self._operators)} 个需求算子，"
                 f"开发表包含 {list(self._dev_table.keys())} 等 sheet"
             )
+
+            # Merge business-level data into the framework result.
+            # PlanSolveAgent returns {plan, results, statistics (step-level)},
+            # but callers (write_result_excel, summary print) expect
+            # {requirement_result, dev_table_updates, statistics (business)}.
+            if self._format_result_cache:
+                result["requirement_result"] = self._format_result_cache.get(
+                    "requirement_result", self._operators
+                )
+                result["dev_table_updates"] = self._format_result_cache.get(
+                    "dev_table_updates", {}
+                )
+                result["statistics"] = self._format_result_cache.get(
+                    "statistics", {}
+                )
+            else:
+                # format_result step didn't run or failed; return raw operators.
+                result["requirement_result"] = self._operators
+                result["dev_table_updates"] = self._compute_dev_table_updates()
+                result["statistics"] = {
+                    "total": len(self._operators),
+                    "identified": sum(1 for o in self._operators if o.get("operator_lib") != "unrecognized"),
+                    "linked": sum(1 for o in self._operators if o.get("link_status") is not None),
+                    "new_dev_added": 0,
+                    "unrecognized": sum(1 for o in self._operators if o.get("operator_lib") == "unrecognized"),
+                    "warnings": ["format_result step did not complete"],
+                    "unresolved_errors": [],
+                }
+
             return result
         finally:
             await llm_client.close()

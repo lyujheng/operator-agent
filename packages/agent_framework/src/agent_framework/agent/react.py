@@ -79,6 +79,15 @@ class ReActAgent(BaseAgent):
         MaxTurnsExceeded
             If the loop hits ``max_turns`` without a final answer.
         """
+        with span(
+            f"agent_{self.name}",
+            span_type="agent",
+            agent_name=self.name,
+        ) as agent_span:
+            return await self._run_loop(input_data, agent_span)
+
+    async def _run_loop(self, input_data: Any, agent_span: Any) -> Any:
+        """Inner loop extracted for agent-level span wrapping."""
         history = MessageHistory(self.system_prompt)
 
         # Build user message from input_data.
@@ -101,13 +110,24 @@ class ReActAgent(BaseAgent):
                 span_type="llm_call",
                 agent_name=self.name,
                 turn=turn,
-            ):
+            ) as s:
                 await self.hooks.on_llm_start(ctx)
                 response = await self.llm_client.chat_completions(
                     history.messages,
                     tools=self.tools.schemas if self.tools.schemas else None,
                 )
                 await self.hooks.on_llm_end(ctx, response)
+                s.output_data = {
+                    "content_preview": (response.content or "")[:500],
+                    "has_tool_calls": response.has_tool_calls,
+                    "tool_calls": [
+                        tc.function.name for tc in (response.tool_calls or [])
+                    ],
+                    "usage": {
+                        "prompt_tokens": response.usage.prompt_tokens,
+                        "completion_tokens": response.usage.completion_tokens,
+                    },
+                }
 
             # ── no tool_calls → final answer ─────────────────────
             if not response.has_tool_calls:
@@ -120,12 +140,22 @@ class ReActAgent(BaseAgent):
                         history.messages, self.result_schema,
                     )
                     if structured is not None:
+                        agent_span.output_data = {
+                            "result_type": "structured",
+                            "result_preview": json.dumps(structured, ensure_ascii=False, default=str)[:500],
+                            "turns": turn,
+                        }
                         return structured
                     logger.warning(
                         "[%s] Structured output extraction failed, "
                         "falling back to raw content",
                         self.name,
                     )
+                agent_span.output_data = {
+                    "result_type": "text",
+                    "content_preview": (response.content or "")[:500],
+                    "turns": turn,
+                }
                 return response.content
 
             # ── execute tool calls ───────────────────────────────
@@ -159,6 +189,11 @@ class ReActAgent(BaseAgent):
 
             await self.hooks.on_turn_end(ctx)
 
+        agent_span.output_data = {
+            "result_type": "error",
+            "error": f"exceeded {self.max_turns} turns",
+            "turns": self.max_turns,
+        }
         raise MaxTurnsExceeded(
             f"Agent '{self.name}' exceeded {self.max_turns} turns",
             context={"agent": self.name, "max_turns": self.max_turns},

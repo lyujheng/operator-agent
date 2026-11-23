@@ -116,9 +116,10 @@ def load_dev_table_excel(path: str) -> dict[str, list[dict[str, Any]]]:
         for row in ws.iter_rows(min_row=2, values_only=True):
             if not row or row[0] is None:
                 continue
+            # Excel columns: id(0) | operator_name(1) | status(2)
             operators.append({
-                "operator_name": str(row[0] if len(row) > 0 else "").strip(),
-                "status": str(row[1] if len(row) > 1 else "not_developed").strip(),
+                "operator_name": str(row[1] if len(row) > 1 else "").strip(),
+                "status": str(row[2] if len(row) > 2 else "not_developed").strip(),
             })
         dev_table[sheet_name] = operators
 

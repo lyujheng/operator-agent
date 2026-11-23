@@ -1,16 +1,17 @@
 [llm]
-base_url = "https://zyapi.xmsxb.com/v1"
-api_key = "your-api-key"
-model = "mco-4"
+base_url = "https://api.openai.com/v1"
+api_key = "your-api-key"           # override with env LLM_API_KEY
+model = "gpt-4"
 timeout = 120
 max_retries = 3
+structured_output_mode = "openai"
 
 [repos]
 base_dir = "/data/repos"
 
 [excel]
 dev_table_path = "/data/dev_tables/dev_table.xlsx"
-output_dir = "/data/output"
+output_dir = "output"
 
 [agent]
 identify_max_turns = 20
