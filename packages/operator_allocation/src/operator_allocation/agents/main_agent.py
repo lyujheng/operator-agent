@@ -113,7 +113,7 @@ PROCESS_AGENT_SYSTEM_PROMPT = """\
 - 再用 read_file 精确读取确认
 - 需求算子名可能与仓库中的名称不完全一致
 
-命名规范: operator_name 全部小写，下划线连接(如 mul_tensor)，禁止以下划线开头
+命名规范: operator_name 全部小写，下划线连接(如 mul_tensor)，禁止以下划线开头，允许尾随下划线(表示 in-place 操作，如 add_、index_put_impl_)
 去重规则: 新增前必须检查开发表中是否已存在同名算子
 
 可用工具: list_repo_files, search_file_content, read_file, add_dev_operator, update_link_status
@@ -600,14 +600,59 @@ class AgentOrchestrator:
         unparsed: list[dict[str, Any]] = []
 
         # Phase 1: Rule-based matching.
+        # Step 1a: Classify all operators via URL patterns.
+        flaggems_ops: list[dict[str, Any]] = []
+        # Operators pending grep verification, grouped by lib.
+        pending_verify: dict[str, list[dict[str, Any]]] = {}
+        no_match: list[dict[str, Any]] = []
+
         for op in self._operators:
             op["operator_lib"] = None  # Reset.
             result = parse_reference_url(op.get("reference_impl", ""))
             if result["operator_lib"]:
-                update_operator_field([op], "operator_lib", result["operator_lib"])
-                parsed.append(op)
+                lib = result["operator_lib"]
+                if lib == "FlagGems":
+                    # pytorch/aten → direct conclusion, no verification needed.
+                    op["operator_lib"] = lib
+                    flaggems_ops.append(op)
+                else:
+                    # vllm/sglang → collect for batch verification.
+                    pending_verify.setdefault(lib, []).append(op)
             else:
-                unparsed.append(op)
+                no_match.append(op)
+
+        parsed.extend(flaggems_ops)
+
+        # Step 1b: Batch-verify vllm/sglang operators per repo.
+        for lib, ops in pending_verify.items():
+            repo_path = self.settings.repo_lib_mapping.get(lib, "")
+            if not repo_path:
+                # No repo configured for this lib; fall through to Phase 2.
+                unparsed.extend(ops)
+                continue
+
+            op_names = [op["operator_name"] for op in ops]
+            found = self._batch_check_definitions(op_names, repo_path)
+
+            if found is None:
+                # Batch grep failed (timeout / unavailable); all go to Phase 2.
+                logger.warning(
+                    "Batch grep failed for %s (%d operators); deferring to Phase 2",
+                    lib,
+                    len(ops),
+                )
+                unparsed.extend(ops)
+                continue
+
+            for op in ops:
+                if op["operator_name"] in found:
+                    op["operator_lib"] = lib
+                    parsed.append(op)
+                else:
+                    # Definition not found; let Phase 2 decide.
+                    unparsed.append(op)
+
+        unparsed.extend(no_match)
 
         logger.info(
             "Rule-based identification: %d parsed, %d unparsed",
@@ -910,6 +955,68 @@ class AgentOrchestrator:
                     return
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
+
+    # ── Repo Definition Verification ──────────────────────────────
+
+    @staticmethod
+    def _batch_check_definitions(
+        operator_names: list[str],
+        repo_path: str,
+    ) -> set[str] | None:
+        """Check which operators have ``def`` definitions in *repo_path*.
+
+        Runs a **single** ``grep -rlF`` pass over the whole repo with all
+        operator names as ``-e`` patterns, then a quick per-name check on
+        only the matched files.  This is dramatically faster on WSL2 than
+        per-operator grep because the expensive filesystem scan happens once.
+
+        Returns:
+            A ``set`` of operator names that have definitions, or ``None``
+            if grep failed entirely (timeout / unavailable) — the caller
+            should fall through to Phase 2 for all operators in that case.
+        """
+        import subprocess
+
+        if not operator_names:
+            return set()
+
+        # Pass 1: single scan to find all files that contain ANY "def <name>(".
+        args = ["grep", "-rlF", "--include=*.py"]
+        for name in operator_names:
+            args.extend(["-e", f"def {name}("])
+        args.append(repo_path)
+
+        try:
+            result = subprocess.run(
+                args, capture_output=True, text=True, timeout=60,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning("Batch grep pass-1 failed for %s: %s", repo_path, exc)
+            return None
+
+        matched_files = result.stdout.strip()
+        if not matched_files:
+            return set()
+
+        files = matched_files.split("\n")
+
+        # Pass 2: per-name check on only the matched files (fast — small set).
+        found: set[str] = set()
+        for name in operator_names:
+            try:
+                r = subprocess.run(
+                    ["grep", "-lF", f"def {name}("] + files,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if r.stdout.strip():
+                    found.add(name)
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                # Individual check failed; treat as not found (→ Phase 2).
+                pass
+
+        return found
 
     # ── Cleanup ──────────────────────────────────────────────────
 

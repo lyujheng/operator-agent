@@ -174,16 +174,22 @@ def write_result_excel(
         ])
 
     # ── Dev table sheets: original + new entries per lib ──
+    # is_new 列仅用于结果查看，不属于 agent 输出数据结构。
     orig = original_dev_table or {}
+    new_name_sets: dict[str, set[str]] = {
+        lib: {op.get("operator_name", "") for op in ops}
+        for lib, ops in dev_table_updates.items()
+    }
     for lib_name in ["FlagGems", "FlagGems-vllm", "FlagGems-sglang"]:
         ws = wb.create_sheet(lib_name)
-        ws.append(["operator_name", "status"])
+        ws.append(["operator_name", "status", "is_new"])
 
         # Original entries.
         for op in orig.get(lib_name, []):
             ws.append([
                 op.get("operator_name", ""),
                 op.get("status", "not_developed"),
+                "",
             ])
 
         # New entries from dev_table_updates.
@@ -192,6 +198,7 @@ def write_result_excel(
             ws.append([
                 op.get("operator_name", ""),
                 op.get("status", "not_developed"),
+                "Y",
             ])
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -203,49 +210,6 @@ def write_result_excel(
         "Result Excel written to %s (%d identified, %d unrecognized, %d new dev)",
         output_path, len(identified), len(unrecognized), new_count,
     )
-    return output_path
-
-
-def write_dev_table_updates_excel(
-    result: dict[str, Any],
-    output_path: str,
-) -> str:
-    """Write dev_table_updates to a separate Excel file.
-
-    Only sheets with new entries are included. If no new entries exist,
-    the file is still written with an empty structure.
-    """
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    if "Sheet" in wb.sheetnames:
-        del wb["Sheet"]
-
-    dev_table_updates = result.get("dev_table_updates", {})
-
-    for lib_name in ["FlagGems", "FlagGems-vllm", "FlagGems-sglang"]:
-        new_ops = dev_table_updates.get(lib_name, [])
-        if not new_ops:
-            continue
-        ws = wb.create_sheet(lib_name)
-        ws.append(["operator_name", "status"])
-        for op in new_ops:
-            ws.append([
-                op.get("operator_name", ""),
-                op.get("status", "not_developed"),
-            ])
-
-    # Ensure at least one sheet exists (openpyxl requires it).
-    if not wb.sheetnames:
-        ws = wb.create_sheet("无新增")
-        ws.append(["(无新增开发算子)"])
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    wb.save(output_path)
-    wb.close()
-
-    total = sum(len(ops) for ops in dev_table_updates.values())
-    logger.info("Dev table updates Excel written to %s (%d new entries)", output_path, total)
     return output_path
 
 
@@ -277,10 +241,6 @@ async def async_main(
     result_excel_path = str(output_dir / "result.xlsx")
     write_result_excel(result, result_excel_path, original_dev_table=dev_table)
 
-    # Write dev_table_updates Excel (incremental only).
-    dev_updates_path = str(output_dir / "dev_table_updates.xlsx")
-    write_dev_table_updates_excel(result, dev_updates_path)
-
     # Print summary.
     stats = result.get("statistics", {})
     dev_updates = result.get("dev_table_updates", {})
@@ -302,7 +262,6 @@ async def async_main(
     if stats.get("unresolved_errors"):
         print(f"  未解决错误: {len(stats['unresolved_errors'])} 条")
     print(f"  结果文件: {result_excel_path}")
-    print(f"  增量更新: {dev_updates_path}")
     print(f"  Trace 日志: {trace_path}")
     print("=" * 60)
 

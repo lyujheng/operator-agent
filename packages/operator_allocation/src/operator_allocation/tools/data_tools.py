@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 VALID_LIBS = {"FlagGems", "FlagGems-vllm", "FlagGems-sglang", "unrecognized"}
 
 # Naming pattern: lowercase, underscore-separated, no leading underscore.
-_NAMING_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
+# Trailing underscore is allowed (indicates in-place operation in PyTorch/ATen,
+# e.g. add_, index_put_impl_).
+_NAMING_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*_?$")
 
 # ── Module-level state ──────────────────────────────────────────
 
@@ -64,13 +66,15 @@ def add_dev_operator(sheet_name: str, operator_name: str) -> dict[str, Any]:
     Validates naming, deduplicates, and appends to the in-memory list.
 
     1. Naming validation: lowercase, underscore-separated, no leading underscore.
+       Trailing underscore is allowed (indicates in-place op, e.g. add_, index_put_impl_).
     2. Dedup: same sheet, same operator_name → return existing (idempotent).
     3. Append: both checks pass → append to in-memory list.
 
     Args:
         sheet_name: Sheet name (e.g. "FlagGems").
         operator_name: Must be lowercase, underscore-separated (e.g. ``mul_tensor``),
-                       must not start with underscore.
+                       must not start with underscore. Trailing underscore is allowed
+                       (e.g. ``index_put_impl_`` for in-place operations).
 
     Returns:
         ``{"operator_name": str, "sheet_name": str, "created": bool, "error": str | None}``
@@ -86,7 +90,8 @@ def add_dev_operator(sheet_name: str, operator_name: str) -> dict[str, Any]:
             "error": (
                 f"Naming violation: '{operator_name}' must be lowercase, "
                 "underscore-separated, and not start with underscore "
-                "(e.g. mul_tensor)"
+                "(e.g. mul_tensor). Trailing underscore is allowed for "
+                "in-place ops (e.g. index_put_impl_)"
             ),
         }
 
