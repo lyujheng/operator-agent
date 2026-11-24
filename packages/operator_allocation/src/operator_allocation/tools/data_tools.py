@@ -210,46 +210,49 @@ def check_result(
 ) -> dict[str, Any]:
     """Validate result completeness and correctness on in-memory data.
 
-    Performs 8 types of checks:
+    Performs 7 types of checks:
 
     **requirement_result checks:**
-      - ``missing_operator``: all input operators present
-      - ``lib_mismatch``: operator_lib matches group
-      - ``invalid_link_name``: link_status name exists in dev table (original + updates)
+      - ``lib_mismatch``: operator_lib is a recognised value
+      - ``invalid_link_name``: link_status name exists in the matching
+        operator_lib's dev table (original + updates)
       - ``unlinked_operator``: non-unrecognized operators must have link_status
 
     **dev_table_updates checks:**
-      - ``orphan_dev_operator``: each new dev operator has reverse link
-      - ``dev_sheet_mismatch``: new operator's sheet matches linker's operator_lib
+      - ``orphan_dev_operator``: new dev operator in lib X has at least one
+        requirement operator with ``operator_lib == X`` linking to it
+      - ``dev_lib_mismatch``: new dev operator in lib X is linked to by
+        some requirement operators, but none with ``operator_lib == X``
       - ``dev_naming_violation``: naming convention check
       - ``dev_duplicate``: no collision with original dev table
+
+    All matching uses ``(operator_name, operator_lib)`` — the same
+    ``operator_name`` may appear in different libs.
 
     Returns:
         ``{"passed": bool, "errors": [{"type": str, "operator_name": str, "detail": str}]}``
     """
     errors: list[dict[str, str]] = []
 
-    # Build a combined dev operator lookup: {sheet_name: set(operator_names)}
+    # Build a combined dev operator lookup: {lib_name: set(operator_names)}
     all_dev_names: dict[str, set[str]] = {}
-    for sheet_name, ops in dev_table.items():
-        all_dev_names.setdefault(sheet_name, set())
+    for lib_name, ops in dev_table.items():
+        all_dev_names.setdefault(lib_name, set())
         for op in ops:
-            all_dev_names[sheet_name].add(op.get("operator_name", ""))
-    for sheet_name, ops in dev_table_updates.items():
-        all_dev_names.setdefault(sheet_name, set())
+            all_dev_names[lib_name].add(op.get("operator_name", ""))
+    for lib_name, ops in dev_table_updates.items():
+        all_dev_names.setdefault(lib_name, set())
         for op in ops:
-            all_dev_names[sheet_name].add(op.get("operator_name", ""))
+            all_dev_names[lib_name].add(op.get("operator_name", ""))
 
     # Build original dev operator lookup for duplicate check.
     original_dev_names: dict[str, set[str]] = {}
-    for sheet_name, ops in dev_table.items():
-        original_dev_names.setdefault(sheet_name, set())
+    for lib_name, ops in dev_table.items():
+        original_dev_names.setdefault(lib_name, set())
         for op in ops:
-            original_dev_names[sheet_name].add(op.get("operator_name", ""))
+            original_dev_names[lib_name].add(op.get("operator_name", ""))
 
     # ── requirement_result checks ──
-
-    result_names = {op.get("operator_name", "") for op in requirement_result}
 
     # Check 1: lib_mismatch — operator_lib should be a valid lib.
     for op in requirement_result:
@@ -261,7 +264,7 @@ def check_result(
                 "detail": f"operator_lib='{lib}' is not a valid lib",
             })
 
-    # Check 2: invalid_link_name — link_status operator_name must exist in dev table.
+    # Check 2: invalid_link_name — link_status must exist in the same lib's dev table.
     for op in requirement_result:
         link = op.get("link_status")
         if link is None:
@@ -269,13 +272,13 @@ def check_result(
         lib = op.get("operator_lib", "unrecognized")
         if lib == "unrecognized":
             continue
-        sheet_ops = all_dev_names.get(lib, set())
-        if link not in sheet_ops:
+        lib_ops = all_dev_names.get(lib, set())
+        if link not in lib_ops:
             errors.append({
                 "type": "invalid_link_name",
                 "operator_name": op.get("operator_name", ""),
                 "operator_lib": lib,
-                "detail": f"link_status='{link}' not found in dev table sheet '{lib}'",
+                "detail": f"link_status='{link}' not found in dev table '{lib}'",
             })
 
     # Check 3: unlinked_operator — non-unrecognized with link_status=None.
@@ -290,42 +293,44 @@ def check_result(
 
     # ── dev_table_updates checks ──
 
-    # Build reverse link map: new_dev_name → set of requirement operators linking to it.
-    reverse_links: dict[str, set[str]] = {}
-    for op in requirement_result:
-        link = op.get("link_status")
-        if link:
-            reverse_links.setdefault(link, set()).add(op.get("operator_name", ""))
-
-    for sheet_name, new_ops in dev_table_updates.items():
+    for lib_name, new_ops in dev_table_updates.items():
         for new_op in new_ops:
             op_name = new_op.get("operator_name", "")
 
-            # Check 4: orphan_dev_operator — must have at least one reverse link.
-            if op_name not in reverse_links:
-                errors.append({
-                    "type": "orphan_dev_operator",
-                    "operator_name": op_name,
-                    "detail": f"New dev operator '{op_name}' in sheet '{sheet_name}' "
-                              "has no requirement operator linking to it",
-                })
-
-            # Check 5: dev_sheet_mismatch — linker's operator_lib must match sheet.
-            if op_name in reverse_links:
-                for linker_name in reverse_links[op_name]:
-                    linker = next(
-                        (o for o in requirement_result if o.get("operator_name") == linker_name),
-                        None,
-                    )
-                    if linker and linker.get("operator_lib") != sheet_name:
-                        errors.append({
-                            "type": "dev_sheet_mismatch",
-                            "operator_name": op_name,
-                            "detail": (
-                                f"New dev operator in sheet '{sheet_name}' "
-                                f"but linker '{linker_name}' has operator_lib='{linker.get('operator_lib')}'"
-                            ),
-                        })
+            # Check 4 & 5: orphan / lib mismatch.
+            # A dev entry in lib X is valid only when at least one
+            # requirement operator with operator_lib == X links to it.
+            has_linker_in_lib = any(
+                o.get("link_status") == op_name and o.get("operator_lib") == lib_name
+                for o in requirement_result
+            )
+            if not has_linker_in_lib:
+                has_any_linker = any(
+                    o.get("link_status") == op_name for o in requirement_result
+                )
+                if has_any_linker:
+                    # Linkers exist but none in this lib.
+                    errors.append({
+                        "type": "dev_lib_mismatch",
+                        "operator_name": op_name,
+                        "operator_lib": lib_name,
+                        "detail": (
+                            f"New dev operator '{op_name}' in '{lib_name}' "
+                            f"but no requirement operator with "
+                            f"operator_lib='{lib_name}' links to it"
+                        ),
+                    })
+                else:
+                    # No linker at all.
+                    errors.append({
+                        "type": "orphan_dev_operator",
+                        "operator_name": op_name,
+                        "operator_lib": lib_name,
+                        "detail": (
+                            f"New dev operator '{op_name}' in '{lib_name}' "
+                            "has no requirement operator linking to it"
+                        ),
+                    })
 
             # Check 6: dev_naming_violation.
             if not _NAMING_RE.match(op_name):
@@ -337,13 +342,14 @@ def check_result(
                 })
 
             # Check 7: dev_duplicate — must not collide with original dev table.
-            orig_names = original_dev_names.get(sheet_name, set())
+            orig_names = original_dev_names.get(lib_name, set())
             if op_name in orig_names:
                 errors.append({
                     "type": "dev_duplicate",
                     "operator_name": op_name,
+                    "operator_lib": lib_name,
                     "detail": f"New dev operator '{op_name}' already exists in "
-                              f"original dev table sheet '{sheet_name}'",
+                              f"original dev table '{lib_name}'",
                 })
 
     return {"passed": len(errors) == 0, "errors": errors}

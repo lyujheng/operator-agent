@@ -468,26 +468,40 @@ class AgentOrchestrator:
                 warnings.append(f"unlinked_operator '{op_name}': link_status still None after retries")
 
             elif err_type == "orphan_dev_operator":
-                # Remove orphan from dev_table_updates.
-                for sheet_ops in dev_updates.values():
+                # Remove orphan from the specific lib only.
+                err_lib = error.get("operator_lib", "")
+                if err_lib and err_lib in dev_updates:
+                    sheet_ops = dev_updates[err_lib]
                     sheet_ops[:] = [o for o in sheet_ops if o.get("operator_name") != op_name]
+                else:
+                    for sheet_ops in dev_updates.values():
+                        sheet_ops[:] = [o for o in sheet_ops if o.get("operator_name") != op_name]
                 warnings.append(f"orphan_dev_operator '{op_name}': removed from dev_table_updates")
 
-            elif err_type == "dev_sheet_mismatch":
-                # Remove mismatched entry.
-                for sheet_ops in dev_updates.values():
+            elif err_type == "dev_lib_mismatch":
+                # Remove mismatched entry from the specific lib only.
+                err_lib = error.get("operator_lib", "")
+                if err_lib and err_lib in dev_updates:
+                    sheet_ops = dev_updates[err_lib]
                     sheet_ops[:] = [o for o in sheet_ops if o.get("operator_name") != op_name]
-                warnings.append(f"dev_sheet_mismatch '{op_name}': removed from dev_table_updates")
+                else:
+                    for sheet_ops in dev_updates.values():
+                        sheet_ops[:] = [o for o in sheet_ops if o.get("operator_name") != op_name]
+                warnings.append(f"dev_lib_mismatch '{op_name}': removed from dev_table_updates")
 
             elif err_type == "dev_naming_violation":
                 warnings.append(f"dev_naming_violation '{op_name}': naming enforced at add_dev_operator")
 
             elif err_type == "dev_duplicate":
-                # Remove duplicate, point link_status to existing.
-                for sheet_ops in dev_updates.values():
-                    sheet_ops[:] = [o for o in sheet_ops if o.get("operator_name") != op_name]
-                # Find requirement operators linking to this and keep link_status
+                # Remove duplicate from the specific lib only, keep link_status
                 # (the existing one in original dev table has the same name).
+                err_lib = error.get("operator_lib", "")
+                if err_lib and err_lib in dev_updates:
+                    sheet_ops = dev_updates[err_lib]
+                    sheet_ops[:] = [o for o in sheet_ops if o.get("operator_name") != op_name]
+                else:
+                    for sheet_ops in dev_updates.values():
+                        sheet_ops[:] = [o for o in sheet_ops if o.get("operator_name") != op_name]
                 warnings.append(f"dev_duplicate '{op_name}': removed from updates, link kept to existing")
 
         # Record warnings in statistics.
