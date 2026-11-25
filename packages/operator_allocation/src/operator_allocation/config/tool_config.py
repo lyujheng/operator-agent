@@ -49,7 +49,17 @@ RESULT_SERVER = ToolProfile(
     ],
 )
 
+NO_DEV_SERVER = ToolProfile(
+    name="no_dev_filter_server",
+    description="No-dev filtering: classify operators that don't need development",
+    tool_paths=[
+        "no_dev_filter.filter_no_dev_operators",
+        "no_dev_filter.load_no_dev_known_list",
+        "no_dev_filter.append_to_pending_list",
+    ],
+)
+
 # Registry: profile name → ToolProfile (for CLI --profile lookup)
 PROFILES: dict[str, ToolProfile] = {
-    p.name: p for p in [IDENTIFY_SERVER, PROCESS_SERVER, RESULT_SERVER]
+    p.name: p for p in [IDENTIFY_SERVER, PROCESS_SERVER, RESULT_SERVER, NO_DEV_SERVER]
 }

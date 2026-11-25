@@ -149,7 +149,7 @@ def format_result(
     warnings: list[str] = []
 
     # Field completeness validation.
-    required_fields = {"operator_name", "priority", "reference_impl", "operator_lib", "link_status"}
+    required_fields = {"operator_name", "priority", "reference_impl", "operator_lib", "link_status", "skip_dev"}
     for i, op in enumerate(operators):
         missing = required_fields - set(op.keys())
         if missing:
@@ -158,7 +158,12 @@ def format_result(
             )
             # Fill missing fields with defaults.
             for field in missing:
-                op[field] = None if field == "link_status" else ""
+                if field == "link_status":
+                    op[field] = None
+                elif field == "skip_dev":
+                    op[field] = False
+                else:
+                    op[field] = ""
         # Validate non-empty for original input fields.
         if not op.get("priority"):
             warnings.append(
@@ -173,17 +178,30 @@ def format_result(
     total = len(operators)
     unrecognized = sum(1 for op in operators if op.get("operator_lib") == "unrecognized")
     identified = total - unrecognized
-    linked = sum(1 for op in operators if op.get("link_status") is not None)
+    skip_dev_count = sum(1 for op in operators if op.get("skip_dev"))
+    linked = sum(
+        1 for op in operators
+        if op.get("link_status") is not None and not op.get("skip_dev")
+    )
     new_dev_added = sum(len(v) for v in dev_table_updates.values())
+
+    # skip_dev_detail: group by skip_reason prefix.
+    skip_dev_detail: dict[str, int] = {"exact_match": 0, "llm": 0}
+    for op in operators:
+        if op.get("skip_dev"):
+            reason = op.get("skip_reason", "") or ""
+            prefix = reason.split(":")[0] if ":" in reason else reason
+            if prefix in skip_dev_detail:
+                skip_dev_detail[prefix] += 1
 
     # Internal consistency checks.
     if identified + unrecognized != total:
         warnings.append(
             f"Statistics mismatch: identified({identified}) + unrecognized({unrecognized}) != total({total})"
         )
-    if linked > identified:
+    if linked > identified - skip_dev_count:
         warnings.append(
-            f"Statistics mismatch: linked({linked}) > identified({identified})"
+            f"Statistics mismatch: linked({linked}) > identified({identified}) - skip_dev_count({skip_dev_count})"
         )
 
     return {
@@ -195,6 +213,8 @@ def format_result(
             "linked": linked,
             "new_dev_added": new_dev_added,
             "unrecognized": unrecognized,
+            "skip_dev_count": skip_dev_count,
+            "skip_dev_detail": skip_dev_detail,
             "warnings": warnings,
             "unresolved_errors": [],
         },
@@ -281,10 +301,10 @@ def check_result(
                 "detail": f"link_status='{link}' not found in dev table '{lib}'",
             })
 
-    # Check 3: unlinked_operator — non-unrecognized with link_status=None.
+    # Check 3: unlinked_operator — non-unrecognized, non-skip_dev with link_status=None.
     for op in requirement_result:
         lib = op.get("operator_lib", "unrecognized")
-        if lib != "unrecognized" and op.get("link_status") is None:
+        if lib != "unrecognized" and not op.get("skip_dev") and op.get("link_status") is None:
             errors.append({
                 "type": "unlinked_operator",
                 "operator_name": op.get("operator_name", ""),

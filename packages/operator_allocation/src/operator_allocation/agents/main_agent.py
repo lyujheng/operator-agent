@@ -29,6 +29,7 @@ from agent_framework.llm.client import LLMClient
 from agent_framework.mcp.server import MCPStdioServer
 from agent_framework.tracing.context import span
 
+from operator_allocation.config.no_dev_config import NO_DEV_PROFILES
 from operator_allocation.config.settings import AppSettings
 from operator_allocation.models.operator import ProcessResult
 from operator_allocation.tools.data_tools import (
@@ -59,13 +60,15 @@ MAIN_AGENT_SYSTEM_PROMPT = """\
 
 可用步骤类型:
 - operator_identify: 算子识别（调用识别 agent 确定每个算子的 operator_lib）
-- task_dispatch: 任务分发（按 operator_lib 分发到对应仓库的子 agent 进行关联）
+- no_dev_filter: 无需开发过滤（判断算子是否需要 FlagGems 开发，标记 skip_dev）
+- task_dispatch: 任务分发（按 operator_lib 分发到对应仓库的子 agent 进行关联，skip_dev=True 的算子跳过）
 - format_result: 结果整理（内存整理 + statistics 计算）
 - check_result: 结果检查（完整性和一致性校验 + 降级处理）
 
 每步检查标准示例:
 - operator_identify: "所有算子的 operator_lib 字段必须为 FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized 之一"
-- task_dispatch: "所有非 unrecognized 算子的 link_status 为字符串或为空"
+- no_dev_filter: "所有已配置算子库的算子必须有 skip_dev 判定（True 或 False）"
+- task_dispatch: "所有非 unrecognized 且 skip_dev=False 的算子的 link_status 为字符串或为空"
 - format_result: "statistics 内部一致性通过"
 - check_result: "所有校验通过"
 
@@ -139,23 +142,42 @@ class IdentifyStepSummarizer(StepResultSummarizer):
         }
 
 
+class NoDevFilterStepSummarizer(StepResultSummarizer):
+    """Summarize Step 2: no_dev filter output."""
+
+    def summarize(self, step: PlanStep, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {"step": step.step_name, "data": str(result)[:500]}
+        return {
+            "total": result.get("total", 0),
+            "tier1_no_dev": result.get("tier1_no_dev", 0),
+            "tier2_no_dev": result.get("tier2_no_dev", 0),
+            "pass_to_dispatch": result.get("pass_to_dispatch", 0),
+        }
+
+
 class DispatchStepSummarizer(StepResultSummarizer):
     def summarize(self, step: PlanStep, result: Any) -> dict[str, Any]:
         if not isinstance(result, list):
             return {"step": step.step_name, "data": str(result)[:500]}
-        # Only count operators that were dispatched (exclude unrecognized).
-        dispatched = [op for op in result if op.get("operator_lib") in REPO_LIBS]
+        # Only count operators that were dispatched (exclude unrecognized and skip_dev).
+        dispatched = [
+            op for op in result
+            if op.get("operator_lib") in REPO_LIBS and not op.get("skip_dev")
+        ]
         total = len(dispatched)
         linked = sum(1 for op in dispatched if op.get("link_status") is not None)
         new_added = sum(1 for op in dispatched if op.get("_newly_added", False))
         failed = total - linked
-        skipped = len(result) - total
+        skipped_unrecognized = sum(1 for op in result if op.get("operator_lib") == "unrecognized")
+        skipped_no_dev = sum(1 for op in result if op.get("skip_dev"))
         return {
             "total": total,
             "linked": linked,
             "new_added": new_added,
             "failed": failed,
-            "skipped_unrecognized": skipped,
+            "skipped_unrecognized": skipped_unrecognized,
+            "skipped_no_dev": skipped_no_dev,
             "failed_operator_names": [
                 op["operator_name"] for op in dispatched if op.get("link_status") is None
             ],
@@ -163,7 +185,7 @@ class DispatchStepSummarizer(StepResultSummarizer):
 
 
 class FormatResultStepSummarizer(StepResultSummarizer):
-    """Summarize Step 3: format_result output."""
+    """Summarize Step 4: format_result output."""
 
     def summarize(self, step: PlanStep, result: Any) -> dict[str, Any]:
         if not isinstance(result, dict):
@@ -176,12 +198,13 @@ class FormatResultStepSummarizer(StepResultSummarizer):
             "linked": stats.get("linked", 0),
             "new_dev_added": stats.get("new_dev_added", 0),
             "unrecognized": stats.get("unrecognized", 0),
+            "skip_dev_count": stats.get("skip_dev_count", 0),
             "dev_table_updates_sheets": [k for k, v in dev_updates.items() if v],
         }
 
 
 class CheckStepSummarizer(StepResultSummarizer):
-    """Summarize Step 4: check_result output."""
+    """Summarize Step 5: check_result output."""
 
     def summarize(self, step: PlanStep, result: Any) -> dict[str, Any]:
         if not isinstance(result, dict):
@@ -203,6 +226,7 @@ class CheckStepSummarizer(StepResultSummarizer):
 # Summarizer registry.
 SUMMARIZER_REGISTRY: dict[str, StepResultSummarizer] = {
     "operator_identify": IdentifyStepSummarizer(),
+    "no_dev_filter": NoDevFilterStepSummarizer(),
     "task_dispatch": DispatchStepSummarizer(),
     "format_result": FormatResultStepSummarizer(),
     "check_result": CheckStepSummarizer(),
@@ -258,6 +282,8 @@ class AgentOrchestrator:
                 "reference_impl": op.get("reference_impl", ""),
                 "operator_lib": op.get("operator_lib"),
                 "link_status": op.get("link_status"),
+                "skip_dev": op.get("skip_dev", False),
+                "skip_reason": op.get("skip_reason"),
             }
             for op in requirement_operators
         ]
@@ -288,6 +314,7 @@ class AgentOrchestrator:
         # ── Create PlanSolve main agent ──────────────────────────
         step_executors = {
             "operator_identify": self._execute_identify,
+            "no_dev_filter": self._execute_no_dev_filter,
             "task_dispatch": self._execute_dispatch,
             "format_result": self._execute_format_result,
             "check_result": self._execute_check,
@@ -331,9 +358,11 @@ class AgentOrchestrator:
                 result["statistics"] = {
                     "total": len(self._operators),
                     "identified": sum(1 for o in self._operators if o.get("operator_lib") != "unrecognized"),
-                    "linked": sum(1 for o in self._operators if o.get("link_status") is not None),
+                    "linked": sum(1 for o in self._operators if o.get("link_status") is not None and not o.get("skip_dev")),
                     "new_dev_added": 0,
                     "unrecognized": sum(1 for o in self._operators if o.get("operator_lib") == "unrecognized"),
+                    "skip_dev_count": sum(1 for o in self._operators if o.get("skip_dev")),
+                    "skip_dev_detail": {"exact_match": 0, "llm": 0},
                     "warnings": ["format_result step did not complete"],
                     "unresolved_errors": [],
                 }
@@ -352,17 +381,24 @@ class AgentOrchestrator:
         with span("operator_identify", span_type="step", agent_name="main_agent"):
             return await self._identify_operators()
 
+    async def _execute_no_dev_filter(
+        self, step: PlanStep, prior_results: dict[str, StepResult]
+    ) -> dict[str, Any]:
+        """Step 2: No-dev filter (via MCP NO_DEV_SERVER)."""
+        with span("no_dev_filter", span_type="step", agent_name="main_agent"):
+            return await self._run_no_dev_filter()
+
     async def _execute_dispatch(
         self, step: PlanStep, prior_results: dict[str, StepResult]
     ) -> list[dict[str, Any]]:
-        """Step 2: Task dispatch to per-repo sub-agents."""
+        """Step 3: Task dispatch to per-repo sub-agents."""
         with span("task_dispatch", span_type="step", agent_name="main_agent"):
             return await self._dispatch_operators()
 
     async def _execute_format_result(
         self, step: PlanStep, prior_results: dict[str, StepResult]
     ) -> dict[str, Any]:
-        """Step 3: In-memory result consolidation with statistics."""
+        """Step 4: In-memory result consolidation with statistics."""
         # Compute dev_table_updates by diffing current vs original dev table.
         dev_table_updates = self._compute_dev_table_updates()
 
@@ -373,7 +409,7 @@ class AgentOrchestrator:
     async def _execute_check(
         self, step: PlanStep, prior_results: dict[str, StepResult]
     ) -> dict[str, Any]:
-        """Step 4: In-memory result validation with degradation strategy."""
+        """Step 5: In-memory result validation with degradation strategy."""
         if self._format_result_cache is None:
             # If format_result hasn't been called, compute it first.
             dev_table_updates = self._compute_dev_table_updates()
@@ -544,6 +580,7 @@ class AgentOrchestrator:
         sheet_name: str = "",
         dev_data: list[dict[str, Any]] | None = None,
         operators_data: list[dict[str, Any]] | None = None,
+        filter_context: dict[str, Any] | None = None,
     ) -> AsyncIterator[MCPStdioServer]:
         """Spawn an MCP bridge server subprocess as an async context manager.
 
@@ -565,6 +602,9 @@ class AgentOrchestrator:
         operators_data:
             Requirement operators data for this group (injected into
             subprocess for link_tools state init).
+        filter_context:
+            No-dev filter context dict ``{operators, profile, llm_settings}``
+            (injected into subprocess for no_dev_filter state init).
         """
         args = ["-m", "operator_allocation.server", f"--profile={profile}"]
 
@@ -580,6 +620,10 @@ class AgentOrchestrator:
         if operators_data is not None:
             ops_path = self._write_temp_json(operators_data)
             args.append(f"--operators-json={ops_path}")
+
+        if filter_context is not None:
+            ctx_path = self._write_temp_json(filter_context)
+            args.append(f"--filter-context-json={ctx_path}")
 
         server = MCPStdioServer(
             command=sys.executable,
@@ -604,6 +648,152 @@ class AgentOrchestrator:
         tmp.close()
         self._temp_files.append(tmp.name)
         return tmp.name
+
+    # ── Phase 1.5: No-Dev Filter ──────────────────────────────────
+
+    async def _run_no_dev_filter(self) -> dict[str, Any]:
+        """Execute no_dev filtering for all configured libs via MCP.
+
+        For libs with a NoDevFilterProfile, spawns a NO_DEV_SERVER MCP
+        subprocess, injects operators + profile + LLM settings, and calls
+        ``filter_no_dev_operators`` through the MCP boundary.
+
+        For unconfigured libs, sets skip_dev=False on all operators.
+        """
+        combined_stats: dict[str, Any] = {
+            "total": 0,
+            "tier1_no_dev": 0,
+            "tier2_no_dev": 0,
+            "pass_to_dispatch": 0,
+        }
+
+        # Build profile map, merging config overrides with registered profiles.
+        profiles = dict(NO_DEV_PROFILES)
+        for lib_name, lib_settings in self.settings.no_dev_filter.items():
+            if lib_name in profiles:
+                # Override profile fields from config.toml.
+                profile = profiles[lib_name]
+                if lib_settings.known_list_path:
+                    profile = profile.model_copy(
+                        update={k: v for k, v in lib_settings.model_dump().items() if v}
+                    )
+                    profiles[lib_name] = profile
+
+        llm_settings = {
+            "base_url": self.settings.llm.base_url,
+            "api_key": self.settings.llm.api_key,
+            "model": self.settings.llm.model,
+            "timeout": self.settings.llm.timeout,
+            "max_retries": self.settings.llm.max_retries,
+            "structured_output_mode": self.settings.llm.structured_output_mode,
+        }
+
+        # Run filtering for each configured lib (with up to 3 retries on
+        # incomplete skip_dev judgments per design doc line 238).
+        max_filter_retries = 3
+        for attempt in range(1, max_filter_retries + 1):
+            # Reset stats each attempt so retries don't double-count.
+            combined_stats = {
+                "total": 0,
+                "tier1_no_dev": 0,
+                "tier2_no_dev": 0,
+                "pass_to_dispatch": 0,
+            }
+            for lib_name, profile in profiles.items():
+                # Select operators for this lib.
+                lib_ops = [
+                    op for op in self._operators
+                    if op.get("operator_lib") == lib_name
+                ]
+                if not lib_ops:
+                    continue
+
+                # model_dump(mode="json") converts set→list for
+                # JSON-safe serialisation (valid_categories is set[str]).
+                filter_ctx = {
+                    "operators": lib_ops,
+                    "profile": profile.model_dump(mode="json"),
+                    "llm_settings": llm_settings,
+                }
+
+                with span(
+                    f"no_dev_filter_{lib_name}",
+                    span_type="filter",
+                    agent_name="main_agent",
+                ):
+                    async with self._mcp_server(
+                        "no_dev_filter_server",
+                        filter_context=filter_ctx,
+                    ) as server:
+                        mcp_result = await server.call_tool(
+                            "filter_no_dev_operators", {},
+                        )
+
+                        # Extract JSON from MCP CallToolResult.
+                        result_text = ""
+                        for item in mcp_result.content:
+                            if hasattr(item, "text"):
+                                result_text += item.text
+                        stats = json.loads(result_text)
+
+                        # Map modified operators back to self._operators.
+                        # Use (name, lib) compound key to avoid cross-lib
+                        # contamination when duplicate names exist (Phase 13).
+                        if "operators" in stats:
+                            result_map = {
+                                (op["operator_name"], op.get("operator_lib", "")): op
+                                for op in stats["operators"]
+                            }
+                            for op in self._operators:
+                                key = (op["operator_name"], op.get("operator_lib", ""))
+                                if key in result_map:
+                                    result_op = result_map[key]
+                                    op["skip_dev"] = result_op.get("skip_dev", False)
+                                    op["skip_reason"] = result_op.get("skip_reason")
+
+                        for key in combined_stats:
+                            combined_stats[key] += stats.get(key, 0)
+
+            # For unconfigured libs: ensure all operators have skip_dev set.
+            configured_libs = set(profiles.keys())
+            for op in self._operators:
+                lib = op.get("operator_lib", "unrecognized")
+                if lib not in configured_libs and lib != "unrecognized":
+                    op.setdefault("skip_dev", False)
+                    op.setdefault("skip_reason", None)
+
+            # Validation: all non-unrecognized operators must have skip_dev.
+            missing_judgment = [
+                op for op in self._operators
+                if op.get("operator_lib") != "unrecognized"
+                and "skip_dev" not in op
+            ]
+            if not missing_judgment:
+                break  # All operators have judgments.
+
+            if attempt < max_filter_retries:
+                logger.warning(
+                    "%d operators missing skip_dev judgment (attempt %d/%d), retrying",
+                    len(missing_judgment), attempt, max_filter_retries,
+                )
+            else:
+                # Exceeded retries: default to needs_dev.
+                logger.warning(
+                    "%d operators missing skip_dev judgment after %d retries, defaulting to False",
+                    len(missing_judgment), max_filter_retries,
+                )
+                for op in missing_judgment:
+                    op["skip_dev"] = False
+                    op["skip_reason"] = None
+
+        logger.info(
+            "No-dev filter complete: %d total, %d tier1, %d tier2, %d pass",
+            combined_stats["total"],
+            combined_stats["tier1_no_dev"],
+            combined_stats["tier2_no_dev"],
+            combined_stats["pass_to_dispatch"],
+        )
+        return combined_stats
 
     # ── Phase 1: Operator Identification ─────────────────────────
 
@@ -788,11 +978,11 @@ class AgentOrchestrator:
     async def _dispatch_operators(self) -> list[dict[str, Any]]:
         """Dispatch operators to per-repo sub-agents for linking."""
 
-        # Group by operator_lib (skip unrecognized).
+        # Group by operator_lib (skip unrecognized and skip_dev=True).
         groups: dict[str, list[dict[str, Any]]] = {}
         for op in self._operators:
             lib = op.get("operator_lib", "unrecognized")
-            if lib in REPO_LIBS:
+            if lib in REPO_LIBS and not op.get("skip_dev"):
                 groups.setdefault(lib, []).append(op)
 
         logger.info("Dispatch groups: %s", {k: len(v) for k, v in groups.items()})

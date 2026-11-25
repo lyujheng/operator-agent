@@ -19,6 +19,8 @@ class RequirementOperator(BaseModel):
     reference_impl: str = ""  # URL or file path
     operator_lib: str | None = None  # FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized
     link_status: str | None = None  # dev table operator name, or None
+    skip_dev: bool = False  # True if operator does not need development
+    skip_reason: str | None = None  # e.g. "exact_match:view_shape", "llm:attribute_query"
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump()

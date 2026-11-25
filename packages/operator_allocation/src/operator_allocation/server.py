@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Path to JSON file containing operator data for link_tools state",
     )
+    parser.add_argument(
+        "--filter-context-json",
+        default="",
+        help="Path to JSON file containing no_dev filter context (operators, profile, llm_settings)",
+    )
     return parser.parse_args()
 
 
@@ -87,6 +92,27 @@ async def main() -> None:
                 logger.error(
                     "Failed to load dev table from %s",
                     args.dev_excel_path,
+                    exc_info=True,
+                )
+
+    # Initialize no_dev filter context if provided.
+    if args.filter_context_json:
+        ctx_path = Path(args.filter_context_json)
+        if ctx_path.exists():
+            try:
+                ctx = json.loads(ctx_path.read_text(encoding="utf-8"))
+                from operator_allocation.tools.no_dev_filter import set_filter_context
+
+                set_filter_context(
+                    ctx.get("operators", []),
+                    ctx.get("profile", {}),
+                    ctx.get("llm_settings", {}),
+                )
+                logger.info("Loaded filter context from %s", args.filter_context_json)
+            except Exception:
+                logger.error(
+                    "Failed to load filter context from %s",
+                    args.filter_context_json,
                     exc_info=True,
                 )
 

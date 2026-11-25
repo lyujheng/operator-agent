@@ -149,10 +149,10 @@ def write_result_excel(
     req_result = result.get("requirement_result", [])
     dev_table_updates = result.get("dev_table_updates", {})
 
-    # ── Sheet「已识别」: identified requirement operators ──
+    # ── Sheet「已识別」: identified requirement operators ──
     identified = [op for op in req_result if op.get("operator_lib") != "unrecognized"]
     ws_id = wb.create_sheet("已识别")
-    ws_id.append(["operator_name", "priority", "reference_impl", "operator_lib", "link_status"])
+    ws_id.append(["operator_name", "priority", "reference_impl", "operator_lib", "link_status", "skip_dev", "skip_reason"])
     for op in identified:
         ws_id.append([
             op.get("operator_name", ""),
@@ -160,6 +160,8 @@ def write_result_excel(
             op.get("reference_impl", ""),
             op.get("operator_lib", ""),
             op.get("link_status"),
+            op.get("skip_dev", False),
+            op.get("skip_reason"),
         ])
 
     # ── Sheet「未识别」: unrecognized operators ──
@@ -250,6 +252,10 @@ async def async_main(
     print(f"  总算子数: {stats.get('total', '?')}")
     print(f"  已识别: {stats.get('identified', '?')}")
     print(f"  已关联: {stats.get('linked', '?')}")
+    skip_dev_count = stats.get('skip_dev_count', 0)
+    if skip_dev_count:
+        detail = stats.get('skip_dev_detail', {})
+        print(f"  无需开发: {skip_dev_count} (精确匹配: {detail.get('exact_match', 0)}, LLM: {detail.get('llm', 0)})")
     print(f"  新增开发算子: {stats.get('new_dev_added', '?')}")
     if dev_updates:
         for lib_name, new_ops in dev_updates.items():

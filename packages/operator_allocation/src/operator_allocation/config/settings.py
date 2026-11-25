@@ -62,6 +62,16 @@ class AgentSettings(BaseModel):
     context_compress_threshold: int = 30000
 
 
+class NoDevFilterLibSettings(BaseModel):
+    """Per-lib no_dev filter settings from config.toml."""
+
+    known_list_path: str = ""
+    pending_list_path: str = ""
+    prompt_path: str = ""
+    llm_batch_size: int = 8
+    confidence_threshold: str = "high"
+
+
 class AppSettings(BaseSettings):
     """Top-level settings loaded from a TOML config file.
 
@@ -74,6 +84,7 @@ class AppSettings(BaseSettings):
     repos: RepoSettings = Field(default_factory=RepoSettings)
     excel: ExcelSettings = Field(default_factory=ExcelSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    no_dev_filter: dict[str, NoDevFilterLibSettings] = Field(default_factory=dict)
 
     model_config = {}  # loaded via classmethod, not pydantic-settings sources
 
