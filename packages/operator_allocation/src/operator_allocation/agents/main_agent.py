@@ -75,7 +75,7 @@ MAIN_AGENT_SYSTEM_PROMPT = """\
 IDENTIFY_AGENT_SYSTEM_PROMPT = """\
 你是一个算子识别 agent，负责判断单个算子属于哪个源仓库并映射到开发库。
 
-输入: 单个算子（operator_name + reference_impl）、所有源仓库的本地路径
+输入: 单个算子（operator_name + reference_impl）、所有源仓库的名称
 
 识别策略:
 1. 分析 reference_impl 文本，推测源仓库（关键词: torch、aten、vllm、sglang、路径片段等）
@@ -107,6 +107,7 @@ vllm/sglang 中大量使用 PyTorch 内置算子（如 masked_fill_, pow, add, m
 优先级: 定义点所在仓库优先（不是 reference_impl URL 指向的仓库优先）
 
 可用工具: search_file_content, read_file, list_repo_files, update_operator_field
+工具使用说明: repo_path 参数传仓库名（如 "vllm"、"pytorch"、"sglang"、"torch_npu"），不要传绝对路径
 输出要求: operator_lib 必须为 FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized 之一，不允许为空
 """
 
@@ -703,6 +704,10 @@ class AgentOrchestrator:
             args.append(f"--repo_path={repo_path}")
         if sheet_name:
             args.append(f"--sheet_name={sheet_name}")
+        # Pass base_dir so identify_server can resolve repo names to absolute
+        # paths internally, keeping absolute paths out of LLM messages.
+        if profile == "identify_server":
+            args.append(f"--repo-base-dir={self.settings.repos.base_dir}")
 
         if dev_data is not None:
             dev_path = self._write_temp_json(dev_data)
@@ -1005,12 +1010,15 @@ class AgentOrchestrator:
         tools: ToolRegistry,
     ) -> str:
         """Run a single-operator ReAct session for identification."""
+        # Pass only repo names, not absolute paths — the identify_server
+        # subprocess resolves names to absolute paths via set_repo_base_dir,
+        # so absolute paths never enter LLM messages (which would trigger WAF).
         repos_info = json.dumps(
             {
-                "pytorch": self.settings.repos.pytorch_path,
-                "torch_npu": self.settings.repos.torch_npu_path,
-                "vllm": self.settings.repos.vllm_path,
-                "sglang": self.settings.repos.sglang_path,
+                "pytorch": "pytorch",
+                "torch_npu": "torch_npu",
+                "vllm": "vllm",
+                "sglang": "sglang",
             },
             ensure_ascii=False,
         )

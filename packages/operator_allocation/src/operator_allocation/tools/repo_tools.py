@@ -2,6 +2,18 @@
 
 These tools operate on local clones of official repositories
 (pytorch, torch_npu, vllm, sglang).
+
+Path isolation
+--------------
+When spawned as an identify_server subprocess, tools receive a *repo name*
+(e.g. "vllm") instead of an absolute path so that absolute filesystem paths
+never enter LLM messages (which would trigger WAF path-traversal rules).
+The module-level ``_repo_base_dir`` is set at startup via ``set_repo_base_dir``;
+``_resolve_repo_path`` and ``_resolve_file_path`` then expand names to absolute
+paths internally, keeping them out of the LLM conversation.
+
+process_server continues to pass absolute ``repo_path`` via bridge
+``extra_context`` injection — both absolute paths and repo names are accepted.
 """
 
 from __future__ import annotations
@@ -12,18 +24,66 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+# ── Module-level repo base dir (set once at subprocess startup) ──
+
+_repo_base_dir: str = ""
+
+
+def set_repo_base_dir(base_dir: str) -> None:
+    """Set the base directory containing all cloned repos.
+
+    Called by ``server.py`` on startup when ``--repo-base-dir`` is provided.
+    After this call, tools accept bare repo names (e.g. ``"vllm"``) in
+    addition to absolute paths.
+    """
+    global _repo_base_dir
+    _repo_base_dir = base_dir
+
+
+def _resolve_repo_path(repo_path: str) -> Path:
+    """Resolve repo_path to an absolute Path.
+
+    If *repo_path* is already absolute, return it as-is.
+    Otherwise treat it as a repo name and resolve via ``_repo_base_dir``.
+    """
+    p = Path(repo_path)
+    if p.is_absolute():
+        return p
+    if _repo_base_dir:
+        return Path(_repo_base_dir) / repo_path
+    return p
+
+
+def _resolve_file_path(file_path: str) -> Path:
+    """Resolve file_path to an absolute Path.
+
+    If *file_path* is already absolute, return it as-is.
+    If it is relative and ``_repo_base_dir`` is set, try
+    ``_repo_base_dir / file_path`` (covers ``<repo_name>/<rel_path>`` patterns
+    returned by ``search_file_content``).
+    """
+    p = Path(file_path)
+    if p.is_absolute():
+        return p
+    if _repo_base_dir:
+        candidate = Path(_repo_base_dir) / file_path
+        if candidate.exists():
+            return candidate
+    return p
+
 
 def list_repo_files(repo_path: str, directory: str = ".") -> list[str]:
     """List files in a repo directory.
 
     Args:
-        repo_path: Root path of the repository.
+        repo_path: Repo name (e.g. "vllm") or absolute path to repo root.
         directory: Sub-directory to list (relative to repo_path). Defaults to root.
 
     Returns:
         List of relative file paths under *directory*.
     """
-    target = Path(repo_path) / directory
+    repo = _resolve_repo_path(repo_path)
+    target = repo / directory
     if not target.exists():
         return []
 
@@ -31,7 +91,7 @@ def list_repo_files(repo_path: str, directory: str = ".") -> list[str]:
     for root, _dirs, files in os.walk(target):
         for f in files:
             full = Path(root) / f
-            rel = str(full.relative_to(Path(repo_path)))
+            rel = str(full.relative_to(repo))
             result.append(rel)
     return sorted(result)
 
@@ -46,14 +106,14 @@ def search_file_content(
     Returns matching lines with ±5 surrounding lines of context.
 
     Args:
-        repo_path: Root path of the repository.
+        repo_path: Repo name (e.g. "vllm") or absolute path to repo root.
         keyword: Search keyword (case-insensitive).
         file_pattern: Glob pattern for files to search. Default ``"*.py"``.
 
     Returns:
         List of dicts with ``file_path``, ``line_number``, ``line_content``, ``context``.
     """
-    repo = Path(repo_path)
+    repo = _resolve_repo_path(repo_path)
     if not repo.exists():
         return []
 
@@ -116,14 +176,15 @@ def read_file(
     """Read file content with range control.
 
     Args:
-        file_path: Absolute or relative path to the file.
+        file_path: Relative path within a repo (e.g. "vllm/ops/activation.py"),
+            or absolute path. Relative paths are resolved via ``_repo_base_dir``.
         start_line: 1-indexed start line (default 1).
         max_lines: Maximum lines to return (default 200).
 
     Returns:
         Dict with ``content``, ``total_lines``, and ``range`` [start, end].
     """
-    path = Path(file_path)
+    path = _resolve_file_path(file_path)
     if not path.exists():
         return {
             "content": f"File not found: {file_path}",

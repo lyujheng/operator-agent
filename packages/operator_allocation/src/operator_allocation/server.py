@@ -35,6 +35,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sheet_name", default="", help="Dev table sheet name (for process_server)")
     parser.add_argument("--dev_excel_path", default="", help="Dev table Excel path")
     parser.add_argument(
+        "--repo-base-dir",
+        default="",
+        help="Base directory containing all cloned repos (for identify_server path isolation)",
+    )
+    parser.add_argument(
         "--operators-json",
         default="",
         help="Path to JSON file containing operator data for link_tools state",
@@ -50,6 +55,12 @@ def parse_args() -> argparse.Namespace:
 async def main() -> None:
     args = parse_args()
     profile = PROFILES[args.profile]
+
+    # Initialize repo base dir for path-isolated tool calls (identify_server).
+    if args.repo_base_dir:
+        from operator_allocation.tools.repo_tools import set_repo_base_dir
+        set_repo_base_dir(args.repo_base_dir)
+        logger.info("Repo base dir set to: %s", args.repo_base_dir)
 
     # Initialize in-memory operator state if provided.
     if args.operators_json:
