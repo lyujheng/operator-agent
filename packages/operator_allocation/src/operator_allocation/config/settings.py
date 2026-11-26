@@ -15,9 +15,9 @@ from pydantic_settings import BaseSettings
 class LLMSettings(BaseModel):
     """LLM API connection parameters."""
 
-    base_url: str = "https://api.openai.com/v1"
-    api_key: str = "your-api-key"
-    model: str = "mco-4"
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
     timeout: int = 120
     max_retries: int = 3
     structured_output_mode: str = "openai"  # "openai" | "claude" | "fallback"
@@ -26,14 +26,14 @@ class LLMSettings(BaseModel):
 class RepoSettings(BaseModel):
     """Local repository base directory."""
 
-    base_dir: str = "/data/repos"
+    base_dir: str = ""
 
 
 class ExcelSettings(BaseModel):
     """Excel file paths."""
 
-    dev_table_path: str = "/data/dev_tables/dev_table.xlsx"
-    output_dir: str = "/data/output"
+    dev_table_path: str = ""
+    output_dir: str = "output"
 
 
 class AgentSettings(BaseModel):
@@ -106,6 +106,20 @@ class AppSettings(BaseSettings):
             settings.llm.base_url = env_url
         if env_model := os.environ.get("LLM_MODEL"):
             settings.llm.model = env_model
+
+        # Validate required fields — fail fast on missing config.
+        missing = []
+        if not settings.llm.base_url:
+            missing.append("llm.base_url")
+        if not settings.llm.api_key:
+            missing.append("llm.api_key (or env LLM_API_KEY)")
+        if not settings.llm.model:
+            missing.append("llm.model")
+        if missing:
+            raise ValueError(
+                f"Missing required config: {', '.join(missing)}. "
+                f"Set them in {config_path} or via environment variables."
+            )
 
         return settings
 

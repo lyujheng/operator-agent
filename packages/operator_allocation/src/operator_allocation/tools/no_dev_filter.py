@@ -190,7 +190,7 @@ async def filter_no_dev_operators(
         llm_client = LLMClient(
             base_url=_llm_settings.get("base_url", ""),
             api_key=_llm_settings.get("api_key", ""),
-            model=_llm_settings.get("model", "gpt-4"),
+            model=_llm_settings.get("model", ""),
             timeout=_llm_settings.get("timeout", 120),
             max_retries=_llm_settings.get("max_retries", 3),
             structured_output_mode=_llm_settings.get("structured_output_mode", "openai"),
