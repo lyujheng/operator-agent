@@ -32,10 +32,6 @@ from agent_framework.tracing.context import span
 from operator_allocation.config.no_dev_config import NO_DEV_PROFILES
 from operator_allocation.config.settings import AppSettings
 from operator_allocation.models.operator import ProcessResult
-from operator_allocation.tools.data_tools import (
-    check_result,
-    format_result,
-)
 from operator_allocation.tools.identify_tools import parse_reference_url
 from operator_allocation.tools.link_tools import (
     get_operators,
@@ -53,17 +49,17 @@ REPO_LIBS = {"FlagGems", "FlagGems-vllm", "FlagGems-sglang"}
 # ── System Prompts ───────────────────────────────────────────────
 
 MAIN_AGENT_SYSTEM_PROMPT = """\
-你是一个需求分配编排器，负责协调多个子 agent 完成算子需求的识别、关联和结果输出。
+你是一个需求分配编排器（纯编排，不执行具体任务），负责通过 MCP 协调多个 work tool 完成算子需求的识别、过滤、关联和结果输出。
 
 输入: 需求表(list[dict]) + 开发表(dict[str, list[dict]])
 输出格式: 生成结构化 ExecutionPlan JSON，包含 steps 列表
 
-可用步骤类型:
-- operator_identify: 算子识别（调用识别 agent 确定每个算子的 operator_lib）
-- no_dev_filter: 无需开发过滤（判断算子是否需要 FlagGems 开发，标记 skip_dev）
-- task_dispatch: 任务分发（按 operator_lib 分发到对应仓库的子 agent 进行关联，skip_dev=True 的算子跳过）
-- format_result: 结果整理（内存整理 + statistics 计算）
-- check_result: 结果检查（完整性和一致性校验 + 降级处理）
+可用步骤类型（全部通过 MCP 执行）:
+- operator_identify: 算子识别（MCP + ReActAgent，多轮推理）
+- no_dev_filter: 无需开发过滤（MCP + LLM-powered function，单次操作）
+- task_dispatch: 任务分发（MCP + ReActAgent，每个 lib 独立子进程，skip_dev=True 的算子跳过）
+- format_result: 结果整理（MCP + 纯计算 function，字段校验 + statistics 计算）
+- check_result: 结果检查（MCP + 纯计算 function，完整性和一致性校验 + 降级处理）
 
 每步检查标准示例:
 - operator_identify: "所有算子的 operator_lib 字段必须为 FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized 之一"
@@ -87,13 +83,28 @@ IDENTIFY_AGENT_SYSTEM_PROMPT = """\
 3. 必要时调用 read_file 精确读取确认
 4. 验证通过后按映射规则确定 operator_lib
 
+关键判断 — 调用点 vs 定义点:
+reference_impl URL 指向的位置可能是算子的**调用点**而非**定义点**。
+vllm/sglang 中大量使用 PyTorch 内置算子（如 masked_fill_, pow, add, mul, softmax 等），
+但这些算子的**实现定义**在 PyTorch/ATen 中，vllm/sglang 只是调用方。
+
+判断方法:
+- 如果搜索结果全部是 `tensor.op(...)` / `torch.op(...)` 形式的调用，没有 def/class 定义、
+  没有 C++/CUDA kernel 实现、没有 op 注册代码 → 这是调用点，算子实际属于 PyTorch
+- 如果搜索到了自定义实现（如 class XxxOp、def xxx_kernel、triton.jit 等）→ 这是定义点，
+  算子属于该仓库
+
+纠正规则:
+当 reference_impl 指向 vllm/sglang，但经搜索确认该仓库中只有调用点没有自定义实现时，
+应将 operator_lib 纠正为 FlagGems（属于 PyTorch/ATen 基础算子）。
+
 映射规则:
 - pytorch (aten 算子), torch_npu → FlagGems
-- vllm → FlagGems-vllm
-- sglang → FlagGems-sglang
+- vllm（有自定义实现）→ FlagGems-vllm
+- sglang（有自定义实现）→ FlagGems-sglang
 
 兜底规则: 所有仓库都未找到时，你判断是 aten 算子则标记 FlagGems，否则标记 unrecognized
-优先级: reference_impl 指向的仓库优先；未明确时按 aten > vllm > sglang 顺序匹配
+优先级: 定义点所在仓库优先（不是 reference_impl URL 指向的仓库优先）
 
 可用工具: search_file_content, read_file, list_repo_files, update_operator_field
 输出要求: operator_lib 必须为 FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized 之一，不允许为空
@@ -241,14 +252,16 @@ class AgentOrchestrator:
     Accepts structured data (requirement operators + dev table),
     runs the full plan-and-solve loop, and returns in-memory results.
 
-    Architecture:
-      main_agent (PlanSolveAgent, this process)
-        ├─ identify tools_agent (ReActAgent + MCP subprocess)
-        └─ process tools_agents (ReActAgent + MCP subprocess, one per repo)
+    Architecture (MCP unified execution):
+      main_agent (PlanSolveAgent, pure orchestrator — no direct task execution)
+        ├─ IDENTIFY_SERVER   (Step 1: ReActAgent, multi-turn reasoning)
+        ├─ NO_DEV_SERVER     (Step 2: LLM-powered function, single call)
+        ├─ PROCESS_SERVER×N  (Step 3: ReActAgent per lib, multi-turn reasoning)
+        └─ RESULT_SERVER     (Step 4+5: pure computation functions, shared)
 
-    Communication between layers uses MCP stdio transport: each tools_agent
-    runs as a child process started via ``operator_allocation.server``,
-    and the orchestrator discovers/invokes tools through ``MCPStdioServer``.
+    All communication uses MCP stdio transport: each work tool runs as
+    a child process started via ``operator_allocation.server``, and the
+    orchestrator invokes tools through ``MCPStdioServer.call_tool()``.
     """
 
     def __init__(self, settings: AppSettings) -> None:
@@ -258,6 +271,9 @@ class AgentOrchestrator:
         self._new_dev_entries: dict[str, list[dict[str, Any]]] = {}  # new memory for additions
         self._temp_files: list[str] = []
         self._format_result_cache: dict[str, Any] | None = None
+        # Shared RESULT_SERVER MCP connection for Step 4/5 (lazy-init).
+        self._result_server: MCPStdioServer | None = None
+        self._result_server_ctx: Any | None = None  # AsyncContextManager
 
     async def run(
         self,
@@ -292,6 +308,8 @@ class AgentOrchestrator:
             for sheet, rows in dev_table.items()
         }
         self._new_dev_entries = {}  # reset per run
+        self._result_server = None
+        self._result_server_ctx = None
 
         logger.info("Starting allocation with %d operators", len(self._operators))
         set_operators(self._operators)
@@ -306,12 +324,8 @@ class AgentOrchestrator:
             structured_output_mode=self.settings.llm.structured_output_mode,
         )
 
-        # ── Build tool registry (for result tools) ───────────────
-        result_tools = ToolRegistry()
-        result_tools.register(format_result)
-        result_tools.register(check_result)
-
         # ── Create PlanSolve main agent ──────────────────────────
+        # All tools execute through MCP — no local ToolRegistry needed.
         step_executors = {
             "operator_identify": self._execute_identify,
             "no_dev_filter": self._execute_no_dev_filter,
@@ -323,7 +337,7 @@ class AgentOrchestrator:
         main_agent = PlanSolveAgent(
             name="main_agent",
             llm_client=llm_client,
-            tools=result_tools,
+            tools=ToolRegistry(),  # empty — main agent is pure orchestrator
             system_prompt=MAIN_AGENT_SYSTEM_PROMPT,
             max_retries=self.settings.agent.max_retries,
             step_executors=step_executors,
@@ -369,6 +383,7 @@ class AgentOrchestrator:
 
             return result
         finally:
+            await self._shutdown_result_server()
             await llm_client.close()
             self._cleanup_temp_files()
 
@@ -398,36 +413,57 @@ class AgentOrchestrator:
     async def _execute_format_result(
         self, step: PlanStep, prior_results: dict[str, StepResult]
     ) -> dict[str, Any]:
-        """Step 4: In-memory result consolidation with statistics."""
-        # Compute dev_table_updates by diffing current vs original dev table.
-        dev_table_updates = self._compute_dev_table_updates()
+        """Step 4: Result consolidation via MCP RESULT_SERVER.
 
-        result = format_result(self._operators, dev_table_updates)
+        Spawns the shared RESULT_SERVER (kept alive for Step 5).
+        """
+        dev_table_updates = self._compute_dev_table_updates()
+        server = await self._ensure_result_server()
+
+        result = await self._call_result_tool(
+            server,
+            "format_result",
+            {"operators": self._operators, "dev_table_updates": dev_table_updates},
+        )
         self._format_result_cache = result
         return result
 
     async def _execute_check(
         self, step: PlanStep, prior_results: dict[str, StepResult]
     ) -> dict[str, Any]:
-        """Step 5: In-memory result validation with degradation strategy."""
+        """Step 5: Result validation via MCP RESULT_SERVER (shared with Step 4).
+
+        Degradation logic stays in the main agent (flow control).
+        """
+        server = await self._ensure_result_server()
+
         if self._format_result_cache is None:
-            # If format_result hasn't been called, compute it first.
             dev_table_updates = self._compute_dev_table_updates()
-            self._format_result_cache = format_result(self._operators, dev_table_updates)
+            self._format_result_cache = await self._call_result_tool(
+                server,
+                "format_result",
+                {"operators": self._operators, "dev_table_updates": dev_table_updates},
+            )
 
         req_result = self._format_result_cache.get("requirement_result", self._operators)
         dev_updates = self._format_result_cache.get("dev_table_updates", {})
 
-        check = check_result(req_result, self._dev_table, dev_updates)
+        check = await self._call_result_tool(
+            server,
+            "check_result",
+            {
+                "requirement_result": req_result,
+                "dev_table": self._dev_table,
+                "dev_table_updates": dev_updates,
+            },
+        )
 
         if not check["passed"]:
-            # Apply degradation strategies.
             prev_errors = check.get("errors", [])
-            check = self._apply_degradation(check, req_result, dev_updates)
+            check = await self._apply_degradation(check, req_result, dev_updates, server)
 
             # Convergence detection (D8): if recheck errors are identical
             # to pre-degradation errors, the strategy cannot fix them.
-            # Mark as resolved to stop pointless retries.
             post_errors = check.get("errors", [])
             if not check["passed"] and self._errors_identical(prev_errors, post_errors):
                 logger.warning(
@@ -452,11 +488,12 @@ class AgentOrchestrator:
 
     # ── Degradation Strategy ────────────────────────────────────
 
-    def _apply_degradation(
+    async def _apply_degradation(
         self,
         check: dict[str, Any],
         req_result: list[dict[str, Any]],
         dev_updates: dict[str, list[dict[str, Any]]],
+        server: MCPStdioServer,
     ) -> dict[str, Any]:
         """Apply conservative degradation per error type."""
         warnings: list[str] = []
@@ -500,7 +537,9 @@ class AgentOrchestrator:
                     warnings.append(f"invalid_link_name '{op_name}': cleared link, moved to unrecognized")
 
             elif err_type == "unlinked_operator":
-                # Step 2 already retried. Just record warning.
+                # Don't auto-reassign: unlinked could be a search failure,
+                # not necessarily a misidentified ATen primitive.  The
+                # identify-stage prompt improvement handles the root cause.
                 warnings.append(f"unlinked_operator '{op_name}': link_status still None after retries")
 
             elif err_type == "orphan_dev_operator":
@@ -545,8 +584,16 @@ class AgentOrchestrator:
             stat = self._format_result_cache.get("statistics", {})
             stat.setdefault("warnings", []).extend(warnings)
 
-        # Re-run check_result to confirm no residual errors.
-        recheck = check_result(req_result, self._dev_table, dev_updates)
+        # Re-run check_result via MCP to confirm no residual errors.
+        recheck = await self._call_result_tool(
+            server,
+            "check_result",
+            {
+                "requirement_result": req_result,
+                "dev_table": self._dev_table,
+                "dev_table_updates": dev_updates,
+            },
+        )
         if not recheck["passed"]:
             # Record unresolved errors.
             if self._format_result_cache:
@@ -568,6 +615,50 @@ class AgentOrchestrator:
         ``self._new_dev_entries`` and returned as-is here.
         """
         return dict(self._new_dev_entries)
+
+    # ── RESULT_SERVER Lifecycle ─────────────────────────────────
+
+    async def _ensure_result_server(self) -> MCPStdioServer:
+        """Lazy-start the shared RESULT_SERVER (Step 4/5 share one process).
+
+        The server stays alive until ``_shutdown_result_server`` is called
+        in the ``finally`` block of ``run()``.
+        """
+        if self._result_server is not None:
+            return self._result_server
+
+        ctx = self._mcp_server("result_server")
+        server = await ctx.__aenter__()
+        self._result_server_ctx = ctx
+        self._result_server = server
+        logger.info("RESULT_SERVER started (shared for Step 4/5)")
+        return server
+
+    async def _shutdown_result_server(self) -> None:
+        """Shut down the shared RESULT_SERVER if it's running."""
+        if self._result_server_ctx is not None:
+            try:
+                await self._result_server_ctx.__aexit__(None, None, None)
+            except Exception:
+                logger.debug("RESULT_SERVER shutdown error (non-fatal)", exc_info=True)
+            finally:
+                self._result_server = None
+                self._result_server_ctx = None
+                logger.debug("RESULT_SERVER shut down")
+
+    async def _call_result_tool(
+        self,
+        server: MCPStdioServer,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Call a tool on RESULT_SERVER and parse the JSON result."""
+        mcp_result = await server.call_tool(tool_name, arguments)
+        result_text = ""
+        for item in mcp_result.content:
+            if hasattr(item, "text"):
+                result_text += item.text
+        return json.loads(result_text)
 
     # ── MCP Server Management ───────────────────────────────────
 

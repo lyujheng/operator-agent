@@ -134,9 +134,9 @@ def write_result_excel(
 ) -> str:
     """Write result data back to Excel format.
 
-    Output structure (per requirement doc):
-      - sheet「已识别」: identified operators (operator_lib != unrecognized)
-      - sheet「未识别」: unrecognized operators
+    Output structure:
+      - sheet「valid」: actionable operators (identified, skip_dev=False)
+      - sheet「invalid」: non-actionable operators (unrecognized or skip_dev=True)
       - sheet「FlagGems」/「FlagGems-vllm」/「FlagGems-sglang」:
         original dev table + new dev entries from dev_table_updates
     """
@@ -149,30 +149,41 @@ def write_result_excel(
     req_result = result.get("requirement_result", [])
     dev_table_updates = result.get("dev_table_updates", {})
 
-    # ── Sheet「已识別」: identified requirement operators ──
-    identified = [op for op in req_result if op.get("operator_lib") != "unrecognized"]
-    ws_id = wb.create_sheet("已识别")
-    ws_id.append(["operator_name", "priority", "reference_impl", "operator_lib", "link_status", "skip_dev", "skip_reason"])
-    for op in identified:
-        ws_id.append([
+    # ── Sheet「valid」: actionable requirement operators ──
+    valid = [
+        op for op in req_result
+        if op.get("operator_lib") != "unrecognized" and not op.get("skip_dev")
+    ]
+    ws_valid = wb.create_sheet("valid")
+    ws_valid.append(["operator_name", "priority", "reference_impl", "operator_lib", "link_status"])
+    for op in valid:
+        ws_valid.append([
             op.get("operator_name", ""),
             op.get("priority", ""),
             op.get("reference_impl", ""),
             op.get("operator_lib", ""),
             op.get("link_status"),
-            op.get("skip_dev", False),
-            op.get("skip_reason"),
         ])
 
-    # ── Sheet「未识别」: unrecognized operators ──
-    unrecognized = [op for op in req_result if op.get("operator_lib") == "unrecognized"]
-    ws_un = wb.create_sheet("未识别")
-    ws_un.append(["operator_name", "priority", "reference_impl"])
-    for op in unrecognized:
-        ws_un.append([
+    # ── Sheet「invalid」: non-actionable operators ──
+    # Includes both unrecognized operators and skip_dev=True operators.
+    invalid = [
+        op for op in req_result
+        if op.get("operator_lib") == "unrecognized" or op.get("skip_dev")
+    ]
+    ws_inv = wb.create_sheet("invalid")
+    ws_inv.append(["operator_name", "priority", "reference_impl", "operator_lib", "reason"])
+    for op in invalid:
+        if op.get("operator_lib") == "unrecognized":
+            reason = "unrecognized"
+        else:
+            reason = op.get("skip_reason") or "skip_dev"
+        ws_inv.append([
             op.get("operator_name", ""),
             op.get("priority", ""),
             op.get("reference_impl", ""),
+            op.get("operator_lib", ""),
+            reason,
         ])
 
     # ── Dev table sheets: original + new entries per lib ──
@@ -209,8 +220,8 @@ def write_result_excel(
 
     new_count = sum(len(ops) for ops in dev_table_updates.values())
     logger.info(
-        "Result Excel written to %s (%d identified, %d unrecognized, %d new dev)",
-        output_path, len(identified), len(unrecognized), new_count,
+        "Result Excel written to %s (%d valid, %d invalid, %d new dev)",
+        output_path, len(valid), len(invalid), new_count,
     )
     return output_path
 
@@ -246,23 +257,29 @@ async def async_main(
     # Print summary.
     stats = result.get("statistics", {})
     dev_updates = result.get("dev_table_updates", {})
+    skip_dev_count = stats.get('skip_dev_count', 0)
+    unrecognized_count = stats.get('unrecognized', 0)
+    invalid_count = skip_dev_count + unrecognized_count
+    valid_count = stats.get('identified', 0) - skip_dev_count
+
     print("\n" + "=" * 60)
     print("处理完成")
     print("=" * 60)
     print(f"  总算子数: {stats.get('total', '?')}")
-    print(f"  已识别: {stats.get('identified', '?')}")
-    print(f"  已关联: {stats.get('linked', '?')}")
-    skip_dev_count = stats.get('skip_dev_count', 0)
-    if skip_dev_count:
-        detail = stats.get('skip_dev_detail', {})
-        print(f"  无需开发: {skip_dev_count} (精确匹配: {detail.get('exact_match', 0)}, LLM: {detail.get('llm', 0)})")
-    print(f"  新增开发算子: {stats.get('new_dev_added', '?')}")
+    print(f"  有效需求 (valid): {valid_count}")
+    print(f"    已关联: {stats.get('linked', '?')}")
+    print(f"    新增开发算子: {stats.get('new_dev_added', '?')}")
     if dev_updates:
         for lib_name, new_ops in dev_updates.items():
             if new_ops:
                 names = ", ".join(op.get("operator_name", "?") for op in new_ops)
-                print(f"    - {lib_name}: {names}")
-    print(f"  未识别: {stats.get('unrecognized', '?')}")
+                print(f"      - {lib_name}: {names}")
+    print(f"  无效需求 (invalid): {invalid_count}")
+    if skip_dev_count:
+        detail = stats.get('skip_dev_detail', {})
+        print(f"    无需开发: {skip_dev_count} (精确匹配: {detail.get('exact_match', 0)}, LLM: {detail.get('llm', 0)})")
+    if unrecognized_count:
+        print(f"    未识别: {unrecognized_count}")
     if stats.get("warnings"):
         print(f"  警告: {len(stats['warnings'])} 条")
     if stats.get("unresolved_errors"):

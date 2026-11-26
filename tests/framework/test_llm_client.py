@@ -6,7 +6,7 @@ import json
 import pytest
 import httpx
 
-from agent_framework.llm.client import LLMClient
+from agent_framework.llm.client import LLMClient, _extract_json_text
 from agent_framework.llm.types import LLMResponse, Message, ToolCall
 from agent_framework.exceptions import LLMResponseError, LLMTimeoutError
 
@@ -105,3 +105,46 @@ class TestLLMClientInit:
             model="test-model",
         )
         assert client.base_url == "https://api.example.com/v1"
+
+
+class TestExtractJsonText:
+    """Test _extract_json_text helper for robust LLM output parsing."""
+
+    def test_raw_json_object(self):
+        raw = '{"steps": [{"step_name": "operator_identify"}]}'
+        assert json.loads(_extract_json_text(raw)) == json.loads(raw)
+
+    def test_raw_json_array(self):
+        raw = '[{"step_name": "operator_identify"}]'
+        assert json.loads(_extract_json_text(raw)) == json.loads(raw)
+
+    def test_markdown_fence_json(self):
+        raw = '```json\n{"steps": [{"step_name": "op"}]}\n```'
+        result = json.loads(_extract_json_text(raw))
+        assert result == {"steps": [{"step_name": "op"}]}
+
+    def test_markdown_fence_with_trailing_text(self):
+        """The bug that caused plan parsing to always fail."""
+        raw = '```json\n{"steps": [{"step_name": "op"}]}\n```\n\n以上是执行计划 {详见文档}'
+        result = json.loads(_extract_json_text(raw))
+        assert result == {"steps": [{"step_name": "op"}]}
+
+    def test_json_embedded_in_prose(self):
+        raw = 'Here is the plan:\n{"steps": [{"step_name": "op"}]}\nPlease review.'
+        result = json.loads(_extract_json_text(raw))
+        assert result == {"steps": [{"step_name": "op"}]}
+
+    def test_nested_braces_in_prose(self):
+        """raw_decode correctly handles nested JSON within surrounding text."""
+        raw = 'Result: {"a": {"b": 1}, "c": [2, 3]} done.'
+        result = json.loads(_extract_json_text(raw))
+        assert result == {"a": {"b": 1}, "c": [2, 3]}
+
+    def test_whitespace_stripped(self):
+        raw = '  \n  {"key": "value"}  \n  '
+        result = json.loads(_extract_json_text(raw))
+        assert result == {"key": "value"}
+
+    def test_no_json_returns_original(self):
+        raw = "No JSON here at all"
+        assert _extract_json_text(raw) == raw.strip()

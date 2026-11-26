@@ -22,6 +22,7 @@ from agent_framework.agent.plan_types import (
     StepResultSummarizer,
 )
 from agent_framework.exceptions import MaxRetriesExceeded
+from agent_framework.llm.client import _extract_json_text
 from agent_framework.llm.types import Message
 from agent_framework.tracing.context import span
 
@@ -151,24 +152,35 @@ class PlanSolveAgent(BaseAgent):
     async def _generate_plan(self, history: MessageHistory) -> ExecutionPlan:
         """Ask the LLM to produce an ExecutionPlan."""
         with span("plan_generation", span_type="llm_call", agent_name=self.name) as s:
+            # Build the available step list from registered executors.
+            available_steps = ", ".join(sorted(self.step_executors)) if self.step_executors else "operator_identify, task_dispatch, format_result, check_result"
             planning_msg = Message(
                 role="system",
                 content=(
                     "Analyze the input and create a step-by-step execution plan. "
                     "Return a JSON object with a 'steps' array. Each step has: "
                     "step_name, description, agent_type, expected_criteria, depends_on (list of step_names). "
-                    "Available step types: operator_identify, task_dispatch, format_result, check_result."
+                    f"Available step_name values (use ONLY these): {available_steps}."
                 ),
             )
             history.append(planning_msg)
 
-            response = await self.llm_client.chat_completions(history.messages)
-            content = response.content or ""
-            history.append(response.message)
+            plan, content, usage = await self._request_plan(history)
+            plan_source = "llm" if plan.steps else "default"
 
-            # Try to parse the plan from LLM output.
-            plan = self._parse_plan(content)
-            plan_source = "llm"
+            # Validate: all step_names must have a registered executor.
+            if plan.steps and self.step_executors:
+                registered = set(self.step_executors)
+                plan_names = {s.step_name for s in plan.steps}
+                unknown = plan_names - registered
+                if unknown:
+                    logger.warning(
+                        "LLM plan has unregistered steps %s; using default plan",
+                        unknown,
+                    )
+                    plan = ExecutionPlan()
+                    plan_source = "default"
+
             if not plan.steps:
                 plan = self._default_plan()
                 plan_source = "default"
@@ -176,25 +188,44 @@ class PlanSolveAgent(BaseAgent):
 
             s.output_data = {
                 "content_preview": content[:500],
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                },
+                "usage": usage,
                 "plan_steps": [step.step_name for step in plan.steps],
                 "plan_source": plan_source,
             }
 
         return plan
 
+    async def _request_plan(
+        self, history: MessageHistory
+    ) -> tuple[ExecutionPlan, str, dict[str, int]]:
+        """Request a plan from the LLM and parse the response.
+
+        Returns ``(plan, raw_content, usage_dict)``.  The default
+        implementation uses ``chat_completions`` + free-text JSON
+        extraction.  Override this method to use
+        ``get_structured_output`` when the LLM backend supports it::
+
+            async def _request_plan(self, history):
+                data = await self.llm_client.get_structured_output(
+                    history.messages, ExecutionPlan,
+                )
+                if data:
+                    return ExecutionPlan(**data), json.dumps(data), {}
+                return ExecutionPlan(), "", {}
+        """
+        response = await self.llm_client.chat_completions(history.messages)
+        content = response.content or ""
+        history.append(response.message)
+        plan = self._parse_plan(content)
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+        }
+        return plan, content, usage
+
     def _parse_plan(self, content: str) -> ExecutionPlan:
         """Extract an ExecutionPlan from LLM text (may contain markdown fences)."""
-        # Strip markdown code fences if present.
-        text = content.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            # Remove first and last fence lines.
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines)
+        text = _extract_json_text(content)
 
         try:
             data = json.loads(text)
@@ -223,13 +254,23 @@ class PlanSolveAgent(BaseAgent):
                     ),
                 ),
                 PlanStep(
-                    step_name="task_dispatch",
-                    description="将已识别的算子分发到对应仓库的子 agent 进行关联",
-                    agent_type="process",
+                    step_name="no_dev_filter",
+                    description="判断已识别算子是否需要开发，标记 skip_dev",
+                    agent_type="no_dev_filter",
                     expected_criteria=(
-                        "所有算子的 link_status 字段为数字 id 或为空(unrecognized 算子)"
+                        "所有已配置算子库的算子必须有 skip_dev 判定（True 或 False）"
                     ),
                     depends_on=["operator_identify"],
+                ),
+                PlanStep(
+                    step_name="task_dispatch",
+                    description="将已识别且需要开发的算子分发到对应仓库的子 agent 进行关联",
+                    agent_type="process",
+                    expected_criteria=(
+                        "所有非 unrecognized 且 skip_dev=False 的算子的 "
+                        "link_status 为字符串或为空"
+                    ),
+                    depends_on=["no_dev_filter"],
                 ),
                 PlanStep(
                     step_name="format_result",
@@ -242,7 +283,7 @@ class PlanSolveAgent(BaseAgent):
                     step_name="check_result",
                     description="校验结果完整性和正确性",
                     agent_type="result",
-                    expected_criteria="所有校验通过: 算子完整、lib 匹配 sheet、link_id 有效",
+                    expected_criteria="所有校验通过",
                     depends_on=["format_result"],
                 ),
             ]
@@ -388,11 +429,7 @@ class PlanSolveAgent(BaseAgent):
             reason = ""
             try:
                 # Try to parse structured response.
-                text = content.strip()
-                if text.startswith("```"):
-                    lines = text.split("\n")
-                    lines = [l for l in lines if not l.strip().startswith("```")]
-                    text = "\n".join(lines)
+                text = _extract_json_text(content)
                 parsed = json.loads(text)
                 passed = bool(parsed.get("passed", False))
                 reason = parsed.get("reason", "")

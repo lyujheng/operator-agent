@@ -24,7 +24,7 @@ class PlanStep(BaseModel):
 
     step_name: str  # e.g. "operator_identify", "task_dispatch"
     description: str
-    agent_type: str  # "identify" | "process" | "result"
+    agent_type: str  # "identify" | "no_dev_filter" | "process" | "result"
     expected_criteria: str  # validation criteria for reflexion check
     depends_on: list[str] = Field(default_factory=list)
 

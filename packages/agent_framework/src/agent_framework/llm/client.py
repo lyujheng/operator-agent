@@ -22,6 +22,54 @@ from agent_framework.llm.types import (
 logger = logging.getLogger(__name__)
 
 
+def _extract_json_text(content: str) -> str:
+    """Extract the JSON portion from LLM output.
+
+    Handles common patterns:
+    - Raw JSON (``{ ... }``)
+    - Markdown fenced (````` ```json\\n{...}\\n``` `````) with optional trailing text
+    - JSON embedded in prose (``raw_decode`` finds the first complete JSON value)
+
+    Returns the extracted text; caller is responsible for ``json.loads``.
+    """
+    text = content.strip()
+
+    # 1. Strip markdown fence: take only the content between opening and closing ```.
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Drop the opening fence line (```json or ```).
+        lines = lines[1:]
+        # Find the closing fence and discard it plus everything after.
+        body_lines: list[str] = []
+        for line in lines:
+            if line.strip() == "```":
+                break
+            body_lines.append(line)
+        text = "\n".join(body_lines).strip()
+
+    # 2. If the text already starts with { or [, return as-is for json.loads.
+    if text.startswith(("{", "[")):
+        return text
+
+    # 3. JSON embedded in prose: use raw_decode to find the first complete
+    #    JSON value, which correctly handles nested brackets and strings.
+    start = -1
+    for i, ch in enumerate(text):
+        if ch in ("{", "["):
+            start = i
+            break
+
+    if start != -1:
+        try:
+            decoder = json.JSONDecoder()
+            _, end_idx = decoder.raw_decode(text, start)
+            return text[start:end_idx]
+        except json.JSONDecodeError:
+            pass
+
+    return text
+
+
 def _parse_json_content(content: str) -> dict[str, Any]:
     """Parse JSON from LLM content, stripping markdown code fences if present.
 
@@ -31,14 +79,7 @@ def _parse_json_content(content: str) -> dict[str, Any]:
 
     Raises ``json.JSONDecodeError`` if no valid JSON can be extracted.
     """
-    text = content.strip()
-    # Strip markdown code fences: ```json ... ``` or ``` ... ```
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # Drop first line (```json or ```) and last line (```)
-        lines = [line for line in lines[1:] if not line.strip() == "```"]
-        text = "\n".join(lines).strip()
-    return json.loads(text)
+    return json.loads(_extract_json_text(content))
 
 
 class LLMClient:
