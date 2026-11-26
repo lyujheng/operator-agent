@@ -93,6 +93,12 @@ def _raise_typed(exc: Exception) -> None:
         status = exc.response.status_code
         body = exc.response.text
         if status == 403 and ("/.safeline/" in body or "SafeLine" in body):
+            # Dump the raw WAF response so operators can identify which
+            # rule fired (path traversal, bot UA, rate limit, etc.).
+            logger.warning(
+                "SafeLine WAF 403 response body (first 2000 chars):\n%s",
+                body[:2000],
+            )
             raise LLMResponseError(
                 "HTTP 403 (WAF blocked): SafeLine WAF is blocking LLM API requests"
                 " — whitelist the endpoint in SafeLine admin console",

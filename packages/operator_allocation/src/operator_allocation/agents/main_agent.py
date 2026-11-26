@@ -114,7 +114,7 @@ vllm/sglang 中大量使用 PyTorch 内置算子（如 masked_fill_, pow, add, m
 PROCESS_AGENT_SYSTEM_PROMPT = """\
 你是 {sheet_name} 仓库的算子处理 agent，负责将单个需求算子与开发表中算子进行关联。
 
-输入: 单个需求算子（已识别 operator_lib）+ 已有开发表算子列表 + 仓库路径
+输入: 单个需求算子（已识别 operator_lib）+ 已有开发表算子列表 + sheet 名称
 
 关联逻辑:
 1. 先清空当前算子的 link_status（调用 update_link_status 置为 None）
@@ -127,6 +127,8 @@ PROCESS_AGENT_SYSTEM_PROMPT = """\
 - 从返回的多条匹配中判断哪个是定义位置（关注 def/class 关键字、文件路径）
 - 再用 read_file 精确读取确认
 - 需求算子名可能与仓库中的名称不完全一致
+
+工具使用说明: repo_path 参数不需要传，系统会自动注入。调用 search_file_content / read_file / list_repo_files 时省略 repo_path 即可。
 
 命名规范: operator_name 全部小写，下划线连接(如 mul_tensor)，禁止以下划线开头，允许尾随下划线(表示 in-place 操作，如 add_、index_put_impl_)
 去重规则: 新增前必须检查开发表中是否已存在同名算子
@@ -1196,7 +1198,8 @@ class AgentOrchestrator:
                     input_data = {
                         "operator": op,
                         "dev_operators": dev_ops,
-                        "repo_path": repo_path,
+                        # repo_path 不传给 LLM（防止绝对路径进入 HTTP body 触发 WAF）。
+                        # process_server 通过 extra_context 自动注入 repo_path 到工具调用。
                         "sheet_name": sheet_name,
                     }
 

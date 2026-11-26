@@ -119,6 +119,7 @@ class LLMClient:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "operator-agent/1.0",
             },
             timeout=httpx.Timeout(timeout),
         )
