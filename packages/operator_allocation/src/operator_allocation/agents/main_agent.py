@@ -31,6 +31,7 @@ from agent_framework.tracing.context import span
 
 from operator_allocation.config.no_dev_config import NO_DEV_PROFILES
 from operator_allocation.config.settings import AppSettings
+from operator_allocation.models.no_dev import NoDevFilterProfile
 from operator_allocation.models.operator import ProcessResult
 from operator_allocation.tools.identify_tools import parse_reference_url
 from operator_allocation.tools.link_tools import (
@@ -777,16 +778,29 @@ class AgentOrchestrator:
         }
 
         # Build profile map, merging config overrides with registered profiles.
+        # Config-only libs (not in NO_DEV_PROFILES) are created from config
+        # settings alone, requiring at least known_list_path and prompt_path.
+        # NOTE: config-only libs get DEFAULT_VALID_CATEGORIES — if a lib needs
+        # custom valid_categories (like FlagGems-vllm's {"compile_wrapper"}),
+        # register it in NO_DEV_PROFILES instead.
         profiles = dict(NO_DEV_PROFILES)
         for lib_name, lib_settings in self.settings.no_dev_filter.items():
+            settings_dict = {
+                k: v for k, v in lib_settings.model_dump().items()
+                if v is not None and v != ""
+            }
             if lib_name in profiles:
                 # Override profile fields from config.toml.
                 profile = profiles[lib_name]
                 if lib_settings.known_list_path:
-                    profile = profile.model_copy(
-                        update={k: v for k, v in lib_settings.model_dump().items() if v}
-                    )
+                    profile = profile.model_copy(update=settings_dict)
                     profiles[lib_name] = profile
+            elif lib_settings.known_list_path and lib_settings.prompt_path:
+                # Config-only lib: create profile from config settings.
+                profiles[lib_name] = NoDevFilterProfile(
+                    lib_name=lib_name,
+                    **settings_dict,
+                )
 
         llm_settings = {
             "base_url": self.settings.llm.base_url,

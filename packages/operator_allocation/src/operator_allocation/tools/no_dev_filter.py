@@ -115,6 +115,7 @@ def load_no_dev_known_list(file_path: str) -> dict[str, str]:
 def _normalize_category(raw: str) -> str:
     """Map Chinese category headers to canonical category slugs."""
     mapping = {
+        # FlagGems (pytorch) categories
         "视图/形状变换": "view_shape",
         "视图": "view_shape",
         "形状变换": "view_shape",
@@ -138,6 +139,10 @@ def _normalize_category(raw: str) -> str:
         "Autograd 控制": "autograd_control",
         "autograd 控制": "autograd_control",
         "Nested Tensor 视图": "view_shape",
+        # FlagGems-vllm categories
+        "compile_wrapper": "compile_wrapper",
+        "编译包装": "compile_wrapper",
+        "torch.compile wrapper": "compile_wrapper",
     }
     for key, slug in mapping.items():
         if key in raw:
@@ -347,7 +352,7 @@ async def llm_classify_batch(
         ``NoDevBatchResult`` with one judgment per input operator.
     """
     system_prompt = _read_prompt_file(profile.prompt_path)
-    user_message = _format_batch_for_llm(operators)
+    user_message = _format_batch_for_llm(operators, profile.lib_name)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -378,9 +383,9 @@ def _read_prompt_file(prompt_path: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _format_batch_for_llm(operators: list[dict[str, Any]]) -> str:
+def _format_batch_for_llm(operators: list[dict[str, Any]], lib_name: str = "FlagGems") -> str:
     """Format a batch of operators into LLM user message."""
-    lines = ["请判断以下算子是否需要 FlagGems 开发：", ""]
+    lines = [f"请判断以下算子是否需要 {lib_name} 开发：", ""]
     for i, op in enumerate(operators, 1):
         op_name = op.get("operator_name", "")
         ref = op.get("reference_impl", "")

@@ -20,10 +20,25 @@ FLAGGEMS_PROFILE = NoDevFilterProfile(
     confidence_threshold="high",
 )
 
+# ── FlagGems-vllm Profile ─────────────────────────────────────
+# vllm wrapper operators: compile_wrapper is the only valid no_dev
+# category — intentionally separate from FlagGems' DEFAULT_VALID_CATEGORIES.
+
+FLAGGEMS_VLLM_PROFILE = NoDevFilterProfile(
+    lib_name="FlagGems-vllm",
+    known_list_path="repo/vllm_no_dev_ops.md",
+    pending_list_path="repo/vllm_no_dev_ops_pending.md",
+    prompt_path="repo/prompts/vllm_no_dev_prompt.md",
+    llm_batch_size=8,
+    confidence_threshold="high",
+    valid_categories={"compile_wrapper"},
+)
+
 # ── Profile Registry ───────────────────────────────────────────
 # Maps operator_lib name -> NoDevFilterProfile.
 # Libs not in this registry skip filtering (all operators pass to dispatch).
 
 NO_DEV_PROFILES: dict[str, NoDevFilterProfile] = {
     "FlagGems": FLAGGEMS_PROFILE,
+    "FlagGems-vllm": FLAGGEMS_VLLM_PROFILE,
 }

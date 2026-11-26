@@ -36,3 +36,10 @@ pending_list_path = "repo/torch_no_dev_ops_pending.md"
 prompt_path = "repo/prompts/torch_no_dev_prompt.md"
 llm_batch_size = 8
 confidence_threshold = "high"
+
+[no_dev_filter.FlagGems-vllm]
+known_list_path = "repo/vllm_no_dev_ops.md"
+pending_list_path = "repo/vllm_no_dev_ops_pending.md"
+prompt_path = "repo/prompts/vllm_no_dev_prompt.md"
+llm_batch_size = 8
+confidence_threshold = "high"

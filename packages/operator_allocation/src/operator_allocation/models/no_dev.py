@@ -51,7 +51,7 @@ class NoDevJudgment(BaseModel):
 
     operator_name: str
     verdict: Literal["no_dev", "needs_dev"]
-    category: str | None = None             # one of 9 categories when no_dev, None when needs_dev
+    category: str | None = None             # no_dev: one of the lib profile's valid_categories; needs_dev: None
     confidence: Literal["high", "medium", "low"]
     reasoning: str                          # judgment rationale
 

@@ -527,3 +527,274 @@ class TestModuleState:
         assert len(stats["operators"]) == 1
         assert stats["operators"][0]["operator_name"] == "view"
         assert stats["operators"][0]["skip_dev"] is True
+
+
+# ── Phase 22: FlagGems-vllm Profile & compile_wrapper ────────
+
+class TestVllmProfile:
+    """Tests for FlagGems-vllm no_dev profile (Phase 22)."""
+
+    @pytest.fixture
+    def vllm_known_list_file(self, tmp_path: Path) -> str:
+        """Minimal vllm known_list with compile_wrapper operators."""
+        content = """\
+# vLLM 无需开发算子
+
+## compile_wrapper（8）
+
+| # | 算子名 |
+|---|--------|
+| 1 | qwen_gdn_attention_core |
+| 2 | qwen_gdn_attention_core_fused_norm_packed |
+| 3 | qwen_gdn_attention_core_fused_norm_rocm |
+| 4 | olmo_hybrid_gdn_full_forward |
+| 5 | mamba_mixer |
+| 6 | mamba_mixer2 |
+| 7 | short_conv_forward |
+| 8 | minimax_linear_attn_core |
+"""
+        path = tmp_path / "vllm_known_list.md"
+        path.write_text(content, encoding="utf-8")
+        return str(path)
+
+    @pytest.fixture
+    def vllm_profile(self, vllm_known_list_file: str, tmp_path: Path) -> NoDevFilterProfile:
+        pending = tmp_path / "vllm_pending.md"
+        pending.write_text("# Pending\n\n<!-- auto -->\n", encoding="utf-8")
+        prompt = tmp_path / "vllm_prompt.md"
+        prompt.write_text("You are a vLLM operator classifier.", encoding="utf-8")
+        return NoDevFilterProfile(
+            lib_name="FlagGems-vllm",
+            known_list_path=vllm_known_list_file,
+            pending_list_path=str(pending),
+            prompt_path=str(prompt),
+            llm_batch_size=8,
+            confidence_threshold="high",
+            valid_categories={"compile_wrapper"},
+        )
+
+    def test_tier1_compile_wrapper_match(self, vllm_profile: NoDevFilterProfile) -> None:
+        """All 8 wrapper operators should be caught by Tier 1 exact match."""
+        wrapper_names = [
+            "qwen_gdn_attention_core",
+            "qwen_gdn_attention_core_fused_norm_packed",
+            "qwen_gdn_attention_core_fused_norm_rocm",
+            "olmo_hybrid_gdn_full_forward",
+            "mamba_mixer",
+            "mamba_mixer2",
+            "short_conv_forward",
+            "minimax_linear_attn_core",
+        ]
+        ops = _make_operators(wrapper_names, lib="FlagGems-vllm")
+        llm_client = AsyncMock()
+
+        stats = asyncio.run(filter_no_dev_operators(ops, vllm_profile, llm_client))
+
+        assert stats["tier1_no_dev"] == 8
+        assert stats["tier2_no_dev"] == 0
+        assert stats["pass_to_dispatch"] == 0
+
+        for op in ops:
+            assert op["skip_dev"] is True
+            assert op["skip_reason"] == "exact_match:compile_wrapper"
+
+        # LLM should not have been called (all matched Tier 1).
+        llm_client.get_structured_output.assert_not_called()
+
+    def test_non_wrapper_vllm_ops_not_filtered(self, vllm_profile: NoDevFilterProfile) -> None:
+        """Non-wrapper vllm operators should pass through (needs_dev)."""
+        ops = _make_operators(["triton_w4a16_matmul", "rms_norm"], lib="FlagGems-vllm")
+        llm_client = AsyncMock()
+        llm_client.get_structured_output = AsyncMock(
+            return_value=NoDevBatchResult(judgments=[
+                NoDevJudgment(
+                    operator_name="triton_w4a16_matmul",
+                    verdict="needs_dev",
+                    category=None,
+                    confidence="high",
+                    reasoning="triton kernel",
+                ),
+                NoDevJudgment(
+                    operator_name="rms_norm",
+                    verdict="needs_dev",
+                    category=None,
+                    confidence="high",
+                    reasoning="compute kernel",
+                ),
+            ])
+        )
+
+        stats = asyncio.run(filter_no_dev_operators(ops, vllm_profile, llm_client))
+
+        assert stats["tier1_no_dev"] == 0
+        assert stats["tier2_no_dev"] == 0
+        assert stats["pass_to_dispatch"] == 2
+        assert all(op["skip_dev"] is False for op in ops)
+
+    def test_mixed_wrapper_and_compute_ops(self, vllm_profile: NoDevFilterProfile) -> None:
+        """Mix of wrapper and compute operators: only wrappers get skip_dev."""
+        ops = _make_operators(
+            ["mamba_mixer", "triton_w4a16_matmul", "short_conv_forward"],
+            lib="FlagGems-vllm",
+        )
+        llm_client = AsyncMock()
+        llm_client.get_structured_output = AsyncMock(
+            return_value=NoDevBatchResult(judgments=[
+                NoDevJudgment(
+                    operator_name="triton_w4a16_matmul",
+                    verdict="needs_dev",
+                    category=None,
+                    confidence="high",
+                    reasoning="triton matmul kernel",
+                ),
+            ])
+        )
+
+        stats = asyncio.run(filter_no_dev_operators(ops, vllm_profile, llm_client))
+
+        assert stats["tier1_no_dev"] == 2  # mamba_mixer, short_conv_forward
+        assert stats["pass_to_dispatch"] == 1  # triton_w4a16_matmul
+        assert ops[0]["skip_dev"] is True   # mamba_mixer
+        assert ops[1]["skip_dev"] is False  # triton_w4a16_matmul
+        assert ops[2]["skip_dev"] is True   # short_conv_forward
+
+    def test_vllm_valid_categories_isolated(self) -> None:
+        """FlagGems-vllm valid_categories must NOT include FlagGems categories."""
+        from operator_allocation.config.no_dev_config import (
+            FLAGGEMS_PROFILE,
+            FLAGGEMS_VLLM_PROFILE,
+        )
+        from operator_allocation.models.no_dev import DEFAULT_VALID_CATEGORIES
+
+        # FLAGGEMS_VLLM_PROFILE only has compile_wrapper.
+        assert FLAGGEMS_VLLM_PROFILE.valid_categories == {"compile_wrapper"}
+        # It does not share any categories with FlagGems.
+        assert FLAGGEMS_VLLM_PROFILE.valid_categories.isdisjoint(FLAGGEMS_PROFILE.valid_categories)
+        # FlagGems profile still uses the 9-category default.
+        assert FLAGGEMS_PROFILE.valid_categories == DEFAULT_VALID_CATEGORIES
+
+    def test_llm_tier2_compile_wrapper_accepted(self, vllm_profile: NoDevFilterProfile) -> None:
+        """LLM verdict=no_dev + category=compile_wrapper should be accepted for vllm."""
+        ops = _make_operators(["new_wrapper_op"], lib="FlagGems-vllm")
+        llm_client = AsyncMock()
+        llm_client.get_structured_output = AsyncMock(
+            return_value=NoDevBatchResult(judgments=[
+                NoDevJudgment(
+                    operator_name="new_wrapper_op",
+                    verdict="no_dev",
+                    category="compile_wrapper",
+                    confidence="high",
+                    reasoning="forward_context dispatch only",
+                ),
+            ])
+        )
+
+        stats = asyncio.run(filter_no_dev_operators(ops, vllm_profile, llm_client))
+        assert ops[0]["skip_dev"] is True
+        assert ops[0]["skip_reason"] == "llm:compile_wrapper"
+        assert stats["tier2_no_dev"] == 1
+
+    def test_llm_tier2_flaggems_category_rejected_for_vllm(self, vllm_profile: NoDevFilterProfile) -> None:
+        """LLM returning a FlagGems category for vllm should be rejected (conservative)."""
+        ops = _make_operators(["some_vllm_op"], lib="FlagGems-vllm")
+        llm_client = AsyncMock()
+        llm_client.get_structured_output = AsyncMock(
+            return_value=NoDevBatchResult(judgments=[
+                NoDevJudgment(
+                    operator_name="some_vllm_op",
+                    verdict="no_dev",
+                    category="view_shape",  # FlagGems category, not valid for vllm
+                    confidence="high",
+                    reasoning="pure view",
+                ),
+            ])
+        )
+
+        stats = asyncio.run(filter_no_dev_operators(ops, vllm_profile, llm_client))
+        assert ops[0]["skip_dev"] is False  # rejected: view_shape not in vllm valid_categories
+        assert stats["tier2_no_dev"] == 0
+
+
+class TestVllmNormalizeCategoryExtension:
+    """Test that _normalize_category handles compile_wrapper entries."""
+
+    def test_compile_wrapper_direct(self) -> None:
+        assert _normalize_category("compile_wrapper") == "compile_wrapper"
+
+    def test_compile_wrapper_chinese(self) -> None:
+        assert _normalize_category("编译包装") == "compile_wrapper"
+
+    def test_compile_wrapper_english(self) -> None:
+        assert _normalize_category("torch.compile wrapper") == "compile_wrapper"
+
+
+class TestVllmKnownListParsing:
+    """Test that the actual vllm_no_dev_ops.md file parses correctly."""
+
+    def test_parse_actual_vllm_known_list(self) -> None:
+        """Parse the real vllm_no_dev_ops.md resource file."""
+        known_list_path = Path(__file__).resolve().parents[2] / "repo" / "vllm_no_dev_ops.md"
+        if not known_list_path.exists():
+            pytest.skip("vllm_no_dev_ops.md not found at project root")
+
+        result = load_no_dev_known_list(str(known_list_path))
+        assert len(result) == 8
+        # All should be compile_wrapper.
+        assert all(cat == "compile_wrapper" for cat in result.values())
+        # Check specific operators are present.
+        assert "qwen_gdn_attention_core" in result
+        assert "mamba_mixer" in result
+        assert "minimax_linear_attn_core" in result
+
+
+class TestVllmConfigParsing:
+    """Test config.toml parsing for FlagGems-vllm no_dev_filter settings."""
+
+    def test_flaggems_vllm_settings_parse(self, tmp_path: Path) -> None:
+        """[no_dev_filter.FlagGems-vllm] should parse into NoDevFilterLibSettings."""
+        from operator_allocation.config.settings import AppSettings
+
+        config_content = """\
+[llm]
+base_url = "http://test"
+api_key = "test-key"
+model = "test-model"
+
+[repos]
+base_dir = "/tmp/repos"
+
+[excel]
+dev_table_path = "/tmp/dev.xlsx"
+output_dir = "/tmp/output"
+
+[lib_repo_mapping]
+FlagGems = "pytorch"
+FlagGems-vllm = "vllm"
+
+[no_dev_filter.FlagGems]
+known_list_path = "repo/torch_no_dev_ops.md"
+pending_list_path = "repo/torch_no_dev_ops_pending.md"
+prompt_path = "repo/prompts/torch_no_dev_prompt.md"
+
+[no_dev_filter.FlagGems-vllm]
+known_list_path = "repo/vllm_no_dev_ops.md"
+pending_list_path = "repo/vllm_no_dev_ops_pending.md"
+prompt_path = "repo/prompts/vllm_no_dev_prompt.md"
+llm_batch_size = 8
+confidence_threshold = "high"
+"""
+        config_path = tmp_path / "test_config.toml"
+        config_path.write_text(config_content, encoding="utf-8")
+
+        settings = AppSettings.load(str(config_path))
+
+        assert "FlagGems-vllm" in settings.no_dev_filter
+        vllm_settings = settings.no_dev_filter["FlagGems-vllm"]
+        assert vllm_settings.known_list_path == "repo/vllm_no_dev_ops.md"
+        assert vllm_settings.pending_list_path == "repo/vllm_no_dev_ops_pending.md"
+        assert vllm_settings.prompt_path == "repo/prompts/vllm_no_dev_prompt.md"
+        assert vllm_settings.llm_batch_size == 8
+        assert vllm_settings.confidence_threshold == "high"
+
+        # FlagGems settings should still be present.
+        assert "FlagGems" in settings.no_dev_filter
