@@ -389,4 +389,4 @@ class LLMClient:
                 "Fallback extraction could not build a valid %s from history",
                 schema.__name__,
             )
-            return result  # Return best-effort dict even if validation fails.
+            return None  # Return None on validation failure, not best-effort dict.

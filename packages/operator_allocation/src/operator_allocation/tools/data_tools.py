@@ -282,6 +282,8 @@ def check_result(
     """
     if valid_libs is None:
         valid_libs = _valid_libs
+    else:
+        valid_libs = set(valid_libs)  # Ensure O(1) lookup; MCP may pass list.
     errors: list[dict[str, str]] = []
 
     # Build a combined dev operator lookup: {lib_name: set(operator_names)}

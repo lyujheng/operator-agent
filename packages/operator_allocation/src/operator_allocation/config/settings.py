@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings
 class LLMSettings(BaseModel):
     """LLM API connection parameters."""
 
-    base_url: str = "https://zyapi.xmsxb.com/v1"
+    base_url: str = "https://api.openai.com/v1"
     api_key: str = "your-api-key"
     model: str = "mco-4"
     timeout: int = 120

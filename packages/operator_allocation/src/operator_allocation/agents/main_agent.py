@@ -498,7 +498,7 @@ class AgentOrchestrator:
         if len(a) != len(b):
             return False
         key = lambda e: (e.get("type", ""), e.get("operator_name", ""), e.get("operator_lib", ""))
-        return sorted(a, key=key) == sorted(b, key=key)
+        return sorted(key(e) for e in a) == sorted(key(e) for e in b)
 
     # ── Degradation Strategy ────────────────────────────────────
 
@@ -673,7 +673,14 @@ class AgentOrchestrator:
         for item in mcp_result.content:
             if hasattr(item, "text"):
                 result_text += item.text
-        return json.loads(result_text)
+        if not result_text:
+            raise ValueError(f"MCP tool '{tool_name}' returned empty result")
+        try:
+            return json.loads(result_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"MCP tool '{tool_name}' returned invalid JSON: {result_text[:200]}"
+            ) from exc
 
     # ── MCP Server Management ───────────────────────────────────
 
@@ -997,7 +1004,6 @@ class AgentOrchestrator:
                 max_retries=self.settings.llm.max_retries,
                 structured_output_mode=self.settings.llm.structured_output_mode,
             )
-
             try:
                 # Spawn identify MCP server — lifetime bound to this block.
                 async with self._mcp_server(
@@ -1151,7 +1157,10 @@ class AgentOrchestrator:
         try:
             # Each _dispatch_single_lib spawns its own MCP server via
             # async with, so we can run them concurrently.
+            # Each task returns its own new_dev_entries to avoid shared-state
+            # race conditions — merged sequentially after gather.
             tasks = []
+            task_libs = []
             for lib, ops in groups.items():
                 task = asyncio.create_task(
                     self._dispatch_single_lib(
@@ -1162,9 +1171,22 @@ class AgentOrchestrator:
                     )
                 )
                 tasks.append(task)
+                task_libs.append(lib)
 
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                gather_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # C2 fix: inspect results for exceptions and log them.
+                for lib, result in zip(task_libs, gather_results):
+                    if isinstance(result, Exception):
+                        logger.error(
+                            "Dispatch for lib '%s' failed: %s", lib, result,
+                            exc_info=result,
+                        )
+                    elif isinstance(result, dict):
+                        # C1 fix: merge per-lib new_dev_entries sequentially.
+                        for sheet, entries in result.items():
+                            self._new_dev_entries.setdefault(sheet, []).extend(entries)
         finally:
             await llm_client.close()
 
@@ -1177,11 +1199,11 @@ class AgentOrchestrator:
         original_dev_ops: list[dict[str, Any]],
         repo_path: str,
         llm_client: LLMClient,
-    ) -> list[Any]:
+    ) -> dict[str, list[dict[str, Any]]]:
         """Spawn an MCP server for one lib and process all its operators.
 
-        The server lifetime is bound to the ``async with`` block — it is
-        automatically cleaned up when the block exits.
+        Returns a dict of new dev entries ``{sheet_name: [entries]}`` to be
+        merged by the caller (avoids shared-state mutation during concurrency).
         """
         async with self._mcp_server(
             "process_server",
@@ -1203,11 +1225,14 @@ class AgentOrchestrator:
         original_dev_ops: list[dict[str, Any]],
         repo_path: str,
         llm_client: LLMClient,
-    ) -> list[Any]:
+    ) -> dict[str, list[dict[str, Any]]]:
         """Process all operators for one repo (e.g. FlagGems-vllm).
 
         Uses ToolRegistry.from_mcp() to build tools and injects
         result_schema=ProcessResult for structured output extraction.
+
+        Returns a dict of new dev entries ``{sheet_name: [entries]}``
+        accumulated during processing (task-local, no shared mutation).
         """
         process_tools = await ToolRegistry.from_mcp(mcp_server)
         repo_name = self.settings.get_repo_name(sheet_name)
@@ -1231,6 +1256,7 @@ class AgentOrchestrator:
                        for op in original_dev_ops]
 
         results = []
+        local_new_dev: dict[str, list[dict[str, Any]]] = {}
         for op in operators:
             with span(
                 f"process_{op['operator_name']}",
@@ -1267,15 +1293,14 @@ class AgentOrchestrator:
                         self._extract_link_from_answer(op, str(result), dev_ops)
 
                     # Derive new dev entries from link_status (D3).
-                    # If link_status points to a name not in original dev_table
-                    # or already-accumulated new_dev_entries, record it.
+                    # Task-local accumulation to avoid shared-state race.
                     link = op.get("link_status")
                     if link and sheet_name in self.settings.repo_libs:
                         existing = {o["operator_name"] for o in self._dev_table.get(sheet_name, [])}
-                        existing |= {o["operator_name"] for o in self._new_dev_entries.get(sheet_name, [])}
+                        existing |= {o["operator_name"] for o in local_new_dev.get(sheet_name, [])}
                         if link not in existing:
                             new_entry = {"operator_name": link, "status": "not_developed"}
-                            self._new_dev_entries.setdefault(sheet_name, []).append(new_entry)
+                            local_new_dev.setdefault(sheet_name, []).append(new_entry)
                             dev_ops.append(new_entry)
 
                     results.append(result)
@@ -1291,7 +1316,7 @@ class AgentOrchestrator:
                     op["link_status"] = None
 
         # Server lifetime is managed by the caller's async with block.
-        return results
+        return local_new_dev
 
     @staticmethod
     def _extract_link_from_answer(

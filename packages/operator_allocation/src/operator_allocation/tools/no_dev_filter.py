@@ -362,8 +362,14 @@ async def llm_classify_batch(
     # Try structured output first, retry once on failure.
     for attempt in range(2):
         try:
-            result = await llm_client.get_structured_output(messages, NoDevBatchResult)
-            return result
+            raw = await llm_client.get_structured_output(messages, NoDevBatchResult)
+            if raw is None:
+                raise ValueError("LLM returned None for structured output")
+            # get_structured_output returns dict; construct pydantic model
+            # to ensure type-safe access (e.g. .judgments attribute).
+            if isinstance(raw, dict):
+                return NoDevBatchResult(**raw)
+            return raw  # Already a model instance (future-proof).
         except Exception as exc:
             if attempt == 0:
                 logger.warning("LLM structured output attempt 1 failed: %s, retrying", exc)
@@ -383,7 +389,7 @@ def _read_prompt_file(prompt_path: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _format_batch_for_llm(operators: list[dict[str, Any]], lib_name: str = "FlagGems") -> str:
+def _format_batch_for_llm(operators: list[dict[str, Any]], lib_name: str) -> str:
     """Format a batch of operators into LLM user message."""
     lines = [f"请判断以下算子是否需要 {lib_name} 开发：", ""]
     for i, op in enumerate(operators, 1):
@@ -446,6 +452,7 @@ def append_to_pending_list(file_path: str, new_entries: list[dict[str, Any]]) ->
             lines.append(f"| {i} | {name} | {reasoning} |")
         lines.append("")
 
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
