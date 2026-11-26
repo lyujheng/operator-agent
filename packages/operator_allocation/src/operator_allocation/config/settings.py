@@ -24,25 +24,9 @@ class LLMSettings(BaseModel):
 
 
 class RepoSettings(BaseModel):
-    """Local repository paths."""
+    """Local repository base directory."""
 
     base_dir: str = "/data/repos"
-
-    @property
-    def pytorch_path(self) -> str:
-        return str(Path(self.base_dir) / "pytorch")
-
-    @property
-    def torch_npu_path(self) -> str:
-        return str(Path(self.base_dir) / "torch_npu")
-
-    @property
-    def vllm_path(self) -> str:
-        return str(Path(self.base_dir) / "vllm")
-
-    @property
-    def sglang_path(self) -> str:
-        return str(Path(self.base_dir) / "sglang")
 
 
 class ExcelSettings(BaseModel):
@@ -85,6 +69,12 @@ class AppSettings(BaseSettings):
     excel: ExcelSettings = Field(default_factory=ExcelSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     no_dev_filter: dict[str, NoDevFilterLibSettings] = Field(default_factory=dict)
+    lib_repo_mapping: dict[str, str] = Field(default_factory=dict)
+    """Maps dev table group (lib/sheet name) → repo directory name.
+
+    Loaded from ``[lib_repo_mapping]`` in config.toml.
+    Example: ``{"FlagGems": "pytorch", "FlagGems-vllm": "vllm"}``.
+    """
 
     model_config = {}  # loaded via classmethod, not pydantic-settings sources
 
@@ -119,11 +109,47 @@ class AppSettings(BaseSettings):
 
         return settings
 
+    # ── Computed properties derived from lib_repo_mapping ────────
+
+    @property
+    def valid_libs(self) -> set[str]:
+        """All valid operator_lib values: mapped libs + "unrecognized"."""
+        return set(self.lib_repo_mapping.keys()) | {"unrecognized"}
+
+    @property
+    def repo_libs(self) -> set[str]:
+        """Libs that map to a source code repo (excludes "unrecognized")."""
+        return set(self.lib_repo_mapping.keys())
+
+    @property
+    def skip_grep_libs(self) -> set[str]:
+        """Libs whose repo is too large for per-operator grep verification.
+
+        Currently: libs mapping to "pytorch" (ATen ops identified by URL
+        pattern, no grep needed).
+        """
+        return {lib for lib, repo in self.lib_repo_mapping.items() if repo == "pytorch"}
+
+    @property
+    def all_repo_names(self) -> set[str]:
+        """All unique repo directory names from the mapping."""
+        return set(self.lib_repo_mapping.values())
+
     @property
     def repo_lib_mapping(self) -> dict[str, str]:
-        """Map operator_lib names to local repo paths."""
+        """Map lib names to absolute repo paths (lib → absolute path)."""
         return {
-            "FlagGems": self.repos.pytorch_path,
-            "FlagGems-vllm": self.repos.vllm_path,
-            "FlagGems-sglang": self.repos.sglang_path,
+            lib: str(Path(self.repos.base_dir) / repo_dir)
+            for lib, repo_dir in self.lib_repo_mapping.items()
         }
+
+    def get_repo_path(self, lib: str) -> str:
+        """Get absolute repo path for a lib. Returns empty string if unmapped."""
+        repo_dir = self.lib_repo_mapping.get(lib, "")
+        if not repo_dir:
+            return ""
+        return str(Path(self.repos.base_dir) / repo_dir)
+
+    def get_repo_name(self, lib: str) -> str:
+        """Get repo directory name for a lib. Returns empty string if unmapped."""
+        return self.lib_repo_mapping.get(lib, "")

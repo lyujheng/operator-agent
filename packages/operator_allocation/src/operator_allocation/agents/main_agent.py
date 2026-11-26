@@ -41,14 +41,13 @@ from operator_allocation.tools.link_tools import (
 
 logger = logging.getLogger(__name__)
 
-# Valid operator_lib values.
-VALID_LIBS = {"FlagGems", "FlagGems-vllm", "FlagGems-sglang", "unrecognized"}
-REPO_LIBS = {"FlagGems", "FlagGems-vllm", "FlagGems-sglang"}
+# NOTE: VALID_LIBS / REPO_LIBS are no longer hardcoded here.
+# Use settings.valid_libs / settings.repo_libs (derived from [lib_repo_mapping]).
 
 
 # ── System Prompts ───────────────────────────────────────────────
 
-MAIN_AGENT_SYSTEM_PROMPT = """\
+MAIN_AGENT_SYSTEM_PROMPT_TEMPLATE = """\
 你是一个需求分配编排器（纯编排，不执行具体任务），负责通过 MCP 协调多个 work tool 完成算子需求的识别、过滤、关联和结果输出。
 
 输入: 需求表(list[dict]) + 开发表(dict[str, list[dict]])
@@ -62,17 +61,17 @@ MAIN_AGENT_SYSTEM_PROMPT = """\
 - check_result: 结果检查（MCP + 纯计算 function，完整性和一致性校验 + 降级处理）
 
 每步检查标准示例:
-- operator_identify: "所有算子的 operator_lib 字段必须为 FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized 之一"
+- operator_identify: "所有算子的 operator_lib 字段必须为 {valid_libs_str} 之一"
 - no_dev_filter: "所有已配置算子库的算子必须有 skip_dev 判定（True 或 False）"
 - task_dispatch: "所有非 unrecognized 且 skip_dev=False 的算子的 link_status 为字符串或为空"
 - format_result: "statistics 内部一致性通过"
 - check_result: "所有校验通过"
 
 重试规则: 单步最多重试 10 次，超出则记录失败明细并继续下一步。
-最终输出: {"requirement_result": [...], "dev_table_updates": {...}, "statistics": {...}}
+最终输出: {{"requirement_result": [...], "dev_table_updates": {{}}, "statistics": {{}}}}
 """
 
-IDENTIFY_AGENT_SYSTEM_PROMPT = """\
+IDENTIFY_AGENT_SYSTEM_PROMPT_TEMPLATE = """\
 你是一个算子识别 agent，负责判断单个算子属于哪个源仓库并映射到开发库。
 
 输入: 单个算子（operator_name + reference_impl）、所有源仓库的名称
@@ -96,29 +95,28 @@ vllm/sglang 中大量使用 PyTorch 内置算子（如 masked_fill_, pow, add, m
 
 纠正规则:
 当 reference_impl 指向 vllm/sglang，但经搜索确认该仓库中只有调用点没有自定义实现时，
-应将 operator_lib 纠正为 FlagGems（属于 PyTorch/ATen 基础算子）。
+应将 operator_lib 纠正为 {pytorch_lib}（属于 PyTorch/ATen 基础算子）。
 
-映射规则:
-- pytorch (aten 算子), torch_npu → FlagGems
-- vllm（有自定义实现）→ FlagGems-vllm
-- sglang（有自定义实现）→ FlagGems-sglang
+源仓库 → 开发库映射规则:
+{mapping_rules}
 
-兜底规则: 所有仓库都未找到时，你判断是 aten 算子则标记 FlagGems，否则标记 unrecognized
+兜底规则: 所有仓库都未找到时，你判断是 aten 算子则标记 {pytorch_lib}，否则标记 unrecognized
 优先级: 定义点所在仓库优先（不是 reference_impl URL 指向的仓库优先）
 
 可用工具: search_file_content, read_file, list_repo_files, update_operator_field
-工具使用说明: repo_path 参数传仓库名（如 "vllm"、"pytorch"、"sglang"、"torch_npu"），不要传绝对路径
-输出要求: operator_lib 必须为 FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized 之一，不允许为空
+工具使用说明: repo_path 参数传仓库名（如 {repo_names_example}），不要传绝对路径
+输出要求: operator_lib 必须为 {valid_libs_str} 之一，不允许为空
 """
 
 PROCESS_AGENT_SYSTEM_PROMPT = """\
-你是 {sheet_name} 仓库的算子处理 agent，负责将单个需求算子与开发表中算子进行关联。
+你是 {sheet_name} 开发表的算子处理 agent，负责将单个需求算子与开发表中算子进行关联。
+你搜索的源码仓库是 {repo_name}（不是 {sheet_name}），{sheet_name} 是开发表分组名称。
 
 输入: 单个需求算子（已识别 operator_lib）+ 已有开发表算子列表 + sheet 名称
 
 关联逻辑:
 1. 先清空当前算子的 link_status（调用 update_link_status 置为 None）
-2. 在仓库中确认算子存在（search_file_content 搜索，read_file 确认）
+2. 在 {repo_name} 仓库中确认算子存在（search_file_content 搜索，read_file 确认）
 3. 与已有开发表算子匹配（名称匹配），或新增（add_dev_operator）
 4. 写入 link_status（调用 update_link_status 设置关联的开发算子名称）
 
@@ -171,13 +169,17 @@ class NoDevFilterStepSummarizer(StepResultSummarizer):
 
 
 class DispatchStepSummarizer(StepResultSummarizer):
+    def __init__(self, settings: AppSettings | None = None) -> None:
+        self._settings = settings
+
     def summarize(self, step: PlanStep, result: Any) -> dict[str, Any]:
         if not isinstance(result, list):
             return {"step": step.step_name, "data": str(result)[:500]}
         # Only count operators that were dispatched (exclude unrecognized and skip_dev).
+        repo_libs = self._settings.repo_libs if self._settings else set()
         dispatched = [
             op for op in result
-            if op.get("operator_lib") in REPO_LIBS and not op.get("skip_dev")
+            if op.get("operator_lib") in repo_libs and not op.get("skip_dev")
         ]
         total = len(dispatched)
         linked = sum(1 for op in dispatched if op.get("link_status") is not None)
@@ -228,7 +230,7 @@ class CheckStepSummarizer(StepResultSummarizer):
             "missing_operator", "lib_mismatch", "invalid_link_name", "unlinked_operator",
         }]
         dev_errors = [e for e in errors if e.get("type") in {
-            "orphan_dev_operator", "dev_sheet_mismatch", "dev_naming_violation", "dev_duplicate",
+            "orphan_dev_operator", "dev_lib_mismatch", "dev_naming_violation", "dev_duplicate",
         }]
         return {
             "passed": result.get("passed", False),
@@ -237,14 +239,15 @@ class CheckStepSummarizer(StepResultSummarizer):
         }
 
 
-# Summarizer registry.
-SUMMARIZER_REGISTRY: dict[str, StepResultSummarizer] = {
-    "operator_identify": IdentifyStepSummarizer(),
-    "no_dev_filter": NoDevFilterStepSummarizer(),
-    "task_dispatch": DispatchStepSummarizer(),
-    "format_result": FormatResultStepSummarizer(),
-    "check_result": CheckStepSummarizer(),
-}
+# Summarizer registry builder (dispatch summarizer requires settings).
+def _build_summarizer_registry(settings: AppSettings) -> dict[str, StepResultSummarizer]:
+    return {
+        "operator_identify": IdentifyStepSummarizer(),
+        "no_dev_filter": NoDevFilterStepSummarizer(),
+        "task_dispatch": DispatchStepSummarizer(settings),
+        "format_result": FormatResultStepSummarizer(),
+        "check_result": CheckStepSummarizer(),
+    }
 
 
 # ── AgentOrchestrator ────────────────────────────────────────────
@@ -337,14 +340,20 @@ class AgentOrchestrator:
             "check_result": self._execute_check,
         }
 
+        # Build system prompt with config-driven valid_libs.
+        valid_libs_str = " / ".join(sorted(self.settings.valid_libs))
+        main_system_prompt = MAIN_AGENT_SYSTEM_PROMPT_TEMPLATE.format(
+            valid_libs_str=valid_libs_str,
+        )
+
         main_agent = PlanSolveAgent(
             name="main_agent",
             llm_client=llm_client,
             tools=ToolRegistry(),  # empty — main agent is pure orchestrator
-            system_prompt=MAIN_AGENT_SYSTEM_PROMPT,
+            system_prompt=main_system_prompt,
             max_retries=self.settings.agent.max_retries,
             step_executors=step_executors,
-            summarizers=SUMMARIZER_REGISTRY,
+            summarizers=_build_summarizer_registry(self.settings),
             max_turns=self.settings.agent.max_retries,
         )
 
@@ -458,6 +467,7 @@ class AgentOrchestrator:
                 "requirement_result": req_result,
                 "dev_table": self._dev_table,
                 "dev_table_updates": dev_updates,
+                "valid_libs": sorted(self.settings.valid_libs),
             },
         )
 
@@ -595,6 +605,7 @@ class AgentOrchestrator:
                 "requirement_result": req_result,
                 "dev_table": self._dev_table,
                 "dev_table_updates": dev_updates,
+                "valid_libs": sorted(self.settings.valid_libs),
             },
         )
         if not recheck["passed"]:
@@ -913,7 +924,7 @@ class AgentOrchestrator:
             result = parse_reference_url(op.get("reference_impl", ""))
             if result["operator_lib"]:
                 lib = result["operator_lib"]
-                if lib == "FlagGems":
+                if lib in self.settings.skip_grep_libs:
                     # pytorch/aten → direct conclusion, no verification needed.
                     op["operator_lib"] = lib
                     flaggems_ops.append(op)
@@ -1012,24 +1023,42 @@ class AgentOrchestrator:
         tools: ToolRegistry,
     ) -> str:
         """Run a single-operator ReAct session for identification."""
-        # Pass only repo names, not absolute paths — the identify_server
-        # subprocess resolves names to absolute paths via set_repo_base_dir,
-        # so absolute paths never enter LLM messages (which would trigger WAF).
-        repos_info = json.dumps(
-            {
-                "pytorch": "pytorch",
-                "torch_npu": "torch_npu",
-                "vllm": "vllm",
-                "sglang": "sglang",
-            },
-            ensure_ascii=False,
+        # Build repos_info from config — all unique repo directory names.
+        repos_dict = {name: name for name in sorted(self.settings.all_repo_names)}
+        repos_info = json.dumps(repos_dict, ensure_ascii=False)
+
+        # Build mapping rules text from config.
+        # Group libs by repo for readable rules.
+        repo_to_libs: dict[str, list[str]] = {}
+        for lib, repo in self.settings.lib_repo_mapping.items():
+            repo_to_libs.setdefault(repo, []).append(lib)
+        mapping_lines = []
+        for repo, libs in repo_to_libs.items():
+            libs_str = "、".join(libs)
+            mapping_lines.append(f"- {repo}（有自定义实现）→ {libs_str}")
+        mapping_rules = "\n".join(mapping_lines)
+
+        valid_libs_str = " / ".join(sorted(self.settings.valid_libs))
+        repo_names_example = "、".join(f'"{n}"' for n in sorted(self.settings.all_repo_names))
+
+        # Determine the lib name that maps to pytorch (for aten fallback rule).
+        pytorch_lib = next(
+            (lib for lib, repo in self.settings.lib_repo_mapping.items() if repo == "pytorch"),
+            "FlagGems",  # sensible default if no pytorch mapping exists
+        )
+
+        identify_prompt = IDENTIFY_AGENT_SYSTEM_PROMPT_TEMPLATE.format(
+            mapping_rules=mapping_rules,
+            valid_libs_str=valid_libs_str,
+            repo_names_example=repo_names_example,
+            pytorch_lib=pytorch_lib,
         )
 
         agent = ReActAgent(
             name=f"identify_{op['operator_name']}",
             llm_client=llm_client,
             tools=tools,
-            system_prompt=IDENTIFY_AGENT_SYSTEM_PROMPT,
+            system_prompt=identify_prompt,
             max_turns=self.settings.agent.identify_max_turns,
             max_tool_result_chars=self.settings.agent.max_tool_result_chars,
             context_compress_threshold=self.settings.agent.context_compress_threshold,
@@ -1046,13 +1075,14 @@ class AgentOrchestrator:
         # Extract operator_lib from the agent's final answer.
         return self._extract_lib_from_answer(result_text or "")
 
-    @staticmethod
-    def _extract_lib_from_answer(text: str) -> str:
+    def _extract_lib_from_answer(self, text: str) -> str:
         """Parse the identify agent's final answer to get operator_lib."""
+        valid_libs = self.settings.valid_libs
+
         # If result is already a dict (from structured output).
         if isinstance(text, dict):
             lib = text.get("operator_lib", "")
-            if lib in VALID_LIBS:
+            if lib in valid_libs:
                 return lib
 
         text = str(text)
@@ -1062,13 +1092,19 @@ class AgentOrchestrator:
             data = json.loads(text)
             if isinstance(data, dict) and "operator_lib" in data:
                 lib = data["operator_lib"]
-                if lib in VALID_LIBS:
+                if lib in valid_libs:
                     return lib
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Keyword search in text.
-        for lib in ["FlagGems-vllm", "FlagGems-sglang", "FlagGems", "unrecognized"]:
+        # Keyword search in text — check longer names first to avoid
+        # partial matches (e.g. "FlagGems-vllm" before "FlagGems").
+        sorted_libs = sorted(
+            (lib for lib in valid_libs if lib != "unrecognized"),
+            key=len,
+            reverse=True,
+        )
+        for lib in sorted_libs:
             if lib in text:
                 return lib
 
@@ -1083,7 +1119,7 @@ class AgentOrchestrator:
         groups: dict[str, list[dict[str, Any]]] = {}
         for op in self._operators:
             lib = op.get("operator_lib", "unrecognized")
-            if lib in REPO_LIBS and not op.get("skip_dev"):
+            if lib in self.settings.repo_libs and not op.get("skip_dev"):
                 groups.setdefault(lib, []).append(op)
 
         logger.info("Dispatch groups: %s", {k: len(v) for k, v in groups.items()})
@@ -1160,7 +1196,11 @@ class AgentOrchestrator:
         result_schema=ProcessResult for structured output extraction.
         """
         process_tools = await ToolRegistry.from_mcp(mcp_server)
-        system_prompt = PROCESS_AGENT_SYSTEM_PROMPT.format(sheet_name=sheet_name)
+        repo_name = self.settings.get_repo_name(sheet_name)
+        system_prompt = PROCESS_AGENT_SYSTEM_PROMPT.format(
+            sheet_name=sheet_name,
+            repo_name=repo_name,
+        )
 
         # Pre-load dev operators for this sheet via MCP.
         try:
@@ -1216,7 +1256,7 @@ class AgentOrchestrator:
                     # If link_status points to a name not in original dev_table
                     # or already-accumulated new_dev_entries, record it.
                     link = op.get("link_status")
-                    if link and sheet_name in REPO_LIBS:
+                    if link and sheet_name in self.settings.repo_libs:
                         existing = {o["operator_name"] for o in self._dev_table.get(sheet_name, [])}
                         existing |= {o["operator_name"] for o in self._new_dev_entries.get(sheet_name, [])}
                         if link not in existing:

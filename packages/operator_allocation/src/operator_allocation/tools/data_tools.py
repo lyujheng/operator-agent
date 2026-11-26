@@ -13,8 +13,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Valid operator_lib values (also used as sheet names).
-VALID_LIBS = {"FlagGems", "FlagGems-vllm", "FlagGems-sglang", "unrecognized"}
+# Default valid operator_lib values — used as fallback only.
+# In production, main_agent.py passes valid_libs explicitly via MCP kwargs
+# (from settings.valid_libs), so this default is NOT the primary source of truth.
+# The config-driven AppSettings.valid_libs is authoritative; this fallback
+# exists for backward compatibility and test convenience.
+_valid_libs: set[str] = {"FlagGems", "FlagGems-vllm", "FlagGems-sglang", "unrecognized"}
+
+
+def set_valid_libs(libs: set[str]) -> None:
+    """Override valid_libs from config.
+
+    Available for subprocess initialization if needed, but the primary
+    mechanism is the explicit ``valid_libs`` parameter on ``check_result``.
+    """
+    global _valid_libs
+    _valid_libs = libs
+
+
+def get_valid_libs() -> set[str]:
+    """Return current valid_libs set."""
+    return _valid_libs
 
 # Naming pattern: lowercase, underscore-separated, no leading underscore.
 # Trailing underscore is allowed (indicates in-place operation in PyTorch/ATen,
@@ -227,6 +246,7 @@ def check_result(
     requirement_result: list[dict[str, Any]],
     dev_table: dict[str, list[dict[str, Any]]],
     dev_table_updates: dict[str, list[dict[str, Any]]],
+    valid_libs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Validate result completeness and correctness on in-memory data.
 
@@ -249,9 +269,19 @@ def check_result(
     All matching uses ``(operator_name, operator_lib)`` — the same
     ``operator_name`` may appear in different libs.
 
+    Args:
+        requirement_result: Processed requirement operators.
+        dev_table: Original dev table data.
+        dev_table_updates: New dev operators per sheet.
+        valid_libs: Optional override for valid lib names (list or set).
+                    Falls back to module-level ``_valid_libs`` (set via
+                    ``set_valid_libs``).
+
     Returns:
         ``{"passed": bool, "errors": [{"type": str, "operator_name": str, "detail": str}]}``
     """
+    if valid_libs is None:
+        valid_libs = _valid_libs
     errors: list[dict[str, str]] = []
 
     # Build a combined dev operator lookup: {lib_name: set(operator_names)}
@@ -277,7 +307,7 @@ def check_result(
     # Check 1: lib_mismatch — operator_lib should be a valid lib.
     for op in requirement_result:
         lib = op.get("operator_lib", "")
-        if lib and lib not in VALID_LIBS:
+        if lib and lib not in valid_libs:
             errors.append({
                 "type": "lib_mismatch",
                 "operator_name": op.get("operator_name", ""),

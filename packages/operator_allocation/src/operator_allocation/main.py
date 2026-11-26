@@ -137,7 +137,7 @@ def write_result_excel(
     Output structure:
       - sheet「valid」: actionable operators (identified, skip_dev=False)
       - sheet「invalid」: non-actionable operators (unrecognized or skip_dev=True)
-      - sheet「FlagGems」/「FlagGems-vllm」/「FlagGems-sglang」:
+      - per-lib dev table sheets (dynamically from original_dev_table + dev_table_updates):
         original dev table + new dev entries from dev_table_updates
     """
     from openpyxl import Workbook
@@ -188,12 +188,10 @@ def write_result_excel(
 
     # ── Dev table sheets: original + new entries per lib ──
     # is_new 列仅用于结果查看，不属于 agent 输出数据结构。
+    # Dynamically collect all lib names from original dev table + updates.
     orig = original_dev_table or {}
-    new_name_sets: dict[str, set[str]] = {
-        lib: {op.get("operator_name", "") for op in ops}
-        for lib, ops in dev_table_updates.items()
-    }
-    for lib_name in ["FlagGems", "FlagGems-vllm", "FlagGems-sglang"]:
+    all_lib_names = sorted(set(orig.keys()) | set(dev_table_updates.keys()))
+    for lib_name in all_lib_names:
         ws = wb.create_sheet(lib_name)
         ws.append(["operator_name", "status", "is_new"])
 

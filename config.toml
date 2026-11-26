@@ -20,6 +20,14 @@ max_retries = 10
 max_tool_result_chars = 8000
 context_compress_threshold = 30000
 
+[lib_repo_mapping]
+# Maps dev table group (lib/sheet name) → source code repo directory name.
+# Key = sheet name in dev table Excel, Value = directory under repos.base_dir.
+# Adding a new lib+repo only requires one line here.
+FlagGems = "pytorch"
+FlagGems-vllm = "vllm"
+FlagGems-sglang = "sglang"
+
 [no_dev_filter]
 # Per-lib no_dev filter configuration. Libs without config skip filtering (all operators pass to dispatch).
 [no_dev_filter.FlagGems]
