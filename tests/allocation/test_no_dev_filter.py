@@ -283,6 +283,40 @@ class TestFilterTier2:
         assert all(op["skip_dev"] is False for op in ops)
         assert stats["tier2_no_dev"] == 0
 
+    def test_llm_returns_dict_not_model(self, profile: NoDevFilterProfile) -> None:
+        """get_structured_output returns dict in production; verify dict→model conversion."""
+        ops = _make_operators(["_foobar"])
+        llm_client = AsyncMock()
+        # Return a plain dict (as real get_structured_output does), not a model instance.
+        llm_client.get_structured_output = AsyncMock(
+            return_value={
+                "judgments": [
+                    {
+                        "operator_name": "_foobar",
+                        "verdict": "no_dev",
+                        "category": "test_internal",
+                        "confidence": "high",
+                        "reasoning": "test stub",
+                    },
+                ]
+            }
+        )
+
+        stats = asyncio.run(filter_no_dev_operators(ops, profile, llm_client))
+        assert ops[0]["skip_dev"] is True
+        assert ops[0]["skip_reason"] == "llm:test_internal"
+        assert stats["tier2_no_dev"] == 1
+
+    def test_llm_returns_none(self, profile: NoDevFilterProfile) -> None:
+        """get_structured_output returns None → retry then fallback to needs_dev."""
+        ops = _make_operators(["some_op"])
+        llm_client = AsyncMock()
+        llm_client.get_structured_output = AsyncMock(return_value=None)
+
+        stats = asyncio.run(filter_no_dev_operators(ops, profile, llm_client))
+        assert ops[0]["skip_dev"] is False
+        assert stats["tier2_no_dev"] == 0
+
 
 # ── append_to_pending_list ─────────────────────────────────────
 
