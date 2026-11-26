@@ -91,8 +91,15 @@ def _raise_typed(exc: Exception) -> None:
         raise LLMConnectionError(str(exc), context={"original": type(exc).__name__}) from exc
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        body = exc.response.text
+        if status == 403 and ("/.safeline/" in body or "SafeLine" in body):
+            raise LLMResponseError(
+                "HTTP 403 (WAF blocked): SafeLine WAF is blocking LLM API requests"
+                " — whitelist the endpoint in SafeLine admin console",
+                context={"status_code": status, "waf": "safeline"},
+            ) from exc
         raise LLMResponseError(
-            f"HTTP {status}: {exc.response.text[:500]}",
+            f"HTTP {status}: {body[:500]}",
             context={"status_code": status},
         ) from exc
     # Unknown exception — propagate as-is.

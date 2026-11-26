@@ -21,7 +21,7 @@ from agent_framework.agent.plan_types import (
     StepResult,
     StepResultSummarizer,
 )
-from agent_framework.exceptions import MaxRetriesExceeded
+from agent_framework.exceptions import LLMError, MaxRetriesExceeded
 from agent_framework.llm.client import _extract_json_text
 from agent_framework.llm.types import Message
 from agent_framework.tracing.context import span
@@ -165,7 +165,20 @@ class PlanSolveAgent(BaseAgent):
             )
             history.append(planning_msg)
 
-            plan, content, usage = await self._request_plan(history)
+            try:
+                plan, content, usage = await self._request_plan(history)
+            except LLMError as exc:
+                logger.warning(
+                    "LLM error during planning (%s); using default plan",
+                    exc,
+                )
+                plan = self._default_plan()
+                s.output_data = {
+                    "plan_source": "default",
+                    "plan_steps": [step.step_name for step in plan.steps],
+                    "error": str(exc),
+                }
+                return plan
             plan_source = "llm" if plan.steps else "default"
 
             # Validate: all step_names must have a registered executor.
