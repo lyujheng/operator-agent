@@ -13,9 +13,9 @@ from operator_allocation.models.no_dev import NoDevFilterProfile
 
 FLAGGEMS_PROFILE = NoDevFilterProfile(
     lib_name="FlagGems",
-    known_list_path="repo/torch_no_dev_ops.md",
-    pending_list_path="repo/torch_no_dev_ops_pending.md",
-    prompt_path="repo/prompts/torch_no_dev_prompt.md",
+    known_list_path="resources/no_dev/torch_no_dev_ops.md",
+    pending_list_path="resources/no_dev/torch_no_dev_ops_pending.md",
+    prompt_path="resources/no_dev/prompts/torch_no_dev_prompt.md",
     llm_batch_size=8,
     confidence_threshold="high",
 )
@@ -26,9 +26,9 @@ FLAGGEMS_PROFILE = NoDevFilterProfile(
 
 FLAGGEMS_VLLM_PROFILE = NoDevFilterProfile(
     lib_name="FlagGems-vllm",
-    known_list_path="repo/vllm_no_dev_ops.md",
-    pending_list_path="repo/vllm_no_dev_ops_pending.md",
-    prompt_path="repo/prompts/vllm_no_dev_prompt.md",
+    known_list_path="resources/no_dev/vllm_no_dev_ops.md",
+    pending_list_path="resources/no_dev/vllm_no_dev_ops_pending.md",
+    prompt_path="resources/no_dev/prompts/vllm_no_dev_prompt.md",
     llm_batch_size=8,
     confidence_threshold="high",
     valid_categories={"compile_wrapper"},

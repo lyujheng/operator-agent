@@ -806,14 +806,14 @@ FlagGems = "pytorch"
 FlagGems-vllm = "vllm"
 
 [no_dev_filter.FlagGems]
-known_list_path = "repo/torch_no_dev_ops.md"
-pending_list_path = "repo/torch_no_dev_ops_pending.md"
-prompt_path = "repo/prompts/torch_no_dev_prompt.md"
+known_list_path = "resources/no_dev/torch_no_dev_ops.md"
+pending_list_path = "resources/no_dev/torch_no_dev_ops_pending.md"
+prompt_path = "resources/no_dev/prompts/torch_no_dev_prompt.md"
 
 [no_dev_filter.FlagGems-vllm]
-known_list_path = "repo/vllm_no_dev_ops.md"
-pending_list_path = "repo/vllm_no_dev_ops_pending.md"
-prompt_path = "repo/prompts/vllm_no_dev_prompt.md"
+known_list_path = "resources/no_dev/vllm_no_dev_ops.md"
+pending_list_path = "resources/no_dev/vllm_no_dev_ops_pending.md"
+prompt_path = "resources/no_dev/prompts/vllm_no_dev_prompt.md"
 llm_batch_size = 8
 confidence_threshold = "high"
 """
@@ -824,9 +824,9 @@ confidence_threshold = "high"
 
         assert "FlagGems-vllm" in settings.no_dev_filter
         vllm_settings = settings.no_dev_filter["FlagGems-vllm"]
-        assert vllm_settings.known_list_path == "repo/vllm_no_dev_ops.md"
-        assert vllm_settings.pending_list_path == "repo/vllm_no_dev_ops_pending.md"
-        assert vllm_settings.prompt_path == "repo/prompts/vllm_no_dev_prompt.md"
+        assert vllm_settings.known_list_path == "resources/no_dev/vllm_no_dev_ops.md"
+        assert vllm_settings.pending_list_path == "resources/no_dev/vllm_no_dev_ops_pending.md"
+        assert vllm_settings.prompt_path == "resources/no_dev/prompts/vllm_no_dev_prompt.md"
         assert vllm_settings.llm_batch_size == 8
         assert vllm_settings.confidence_threshold == "high"
 
