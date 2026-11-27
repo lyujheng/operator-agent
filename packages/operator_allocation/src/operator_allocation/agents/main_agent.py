@@ -116,7 +116,7 @@ PROCESS_AGENT_SYSTEM_PROMPT = """\
 输入: 单个需求算子（已识别 operator_lib）+ 已有开发表算子列表 + sheet 名称
 
 关联逻辑:
-1. 先清空当前算子的 link_status（调用 update_link_status 置为 None）
+1. 先清空当前算子的 link_status（调用 update_link_status，只传 operator_name，省略 dev_operator_name）
 2. 在 {repo_name} 仓库中确认算子存在（search_file_content 搜索，read_file 确认）
 3. 与已有开发表算子匹配（名称匹配），或新增（add_dev_operator）
 4. 写入 link_status（调用 update_link_status 设置关联的开发算子名称）
@@ -673,6 +673,13 @@ class AgentOrchestrator:
         for item in mcp_result.content:
             if hasattr(item, "text"):
                 result_text += item.text
+        if mcp_result.is_error:
+            # The bridge reports tool failures as MCP errors instead of
+            # raising; surface them as execution failures, not as malformed
+            # JSON, so a tool bug isn't mistaken for a format problem.
+            raise RuntimeError(
+                f"MCP tool '{tool_name}' failed: {result_text[:200]}"
+            )
         if not result_text:
             raise ValueError(f"MCP tool '{tool_name}' returned empty result")
         try:
@@ -864,6 +871,13 @@ class AgentOrchestrator:
                         for item in mcp_result.content:
                             if hasattr(item, "text"):
                                 result_text += item.text
+                        if mcp_result.is_error:
+                            # Same contract as _call_result_tool: a tool
+                            # failure is not a malformed JSON payload.
+                            raise RuntimeError(
+                                f"MCP tool 'filter_no_dev_operators' failed: "
+                                f"{result_text[:200]}"
+                            )
                         stats = json.loads(result_text)
 
                         # Map modified operators back to self._operators.

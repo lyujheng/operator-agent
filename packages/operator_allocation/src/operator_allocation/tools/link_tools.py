@@ -54,13 +54,14 @@ def update_operator_field(
 
 def update_link_status(
     operator_name: str,
-    dev_operator_name: str | None,
+    dev_operator_name: str | None = None,
 ) -> dict[str, Any]:
     """Set link_status for a single requirement operator.
 
     Args:
         operator_name: The requirement operator to update.
         dev_operator_name: The dev table operator name to link, or None to clear.
+            Omit it (default None) to clear link_status.
 
     Returns:
         {"operator_name": str, "link_status": str | None, "updated": bool}

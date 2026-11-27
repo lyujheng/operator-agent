@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from mcp.types import CallToolRequestParams
 
 from agent_framework.mcp.server import MCPStdioServer
 from agent_framework.mcp.manager import MCPServerManager
@@ -65,6 +68,72 @@ class TestMCPToolToFunctionSchema:
         assert fn["description"] == "Search for keyword in files"
         assert "repo_path" in fn["parameters"]["properties"]
         assert "keyword" in fn["parameters"]["required"]
+
+
+class TestMCPBridgeServerCallTool:
+    """Tool call errors must come back as MCP errors, not raised exceptions."""
+
+    def _make_bridge(self, func, schemas=None):
+        from agent_framework.mcp.bridge import MCPBridgeServer
+
+        class _Stub(MCPBridgeServer):
+            def __init__(self):
+                self.profile = ToolProfile(name="stub", tool_paths=[])
+                self.tool_base_package = "stub"
+                self.extra_context = {}
+                self._functions = {func.__name__: func}
+                self._tool_schemas = schemas or []
+
+        return _Stub()
+
+    def _call(self, bridge, name, arguments):
+        server = bridge.create_low_level_server()
+        handler = server._request_handlers["tools/call"].handler
+        params = CallToolRequestParams(name=name, arguments=arguments)
+        return asyncio.run(handler(None, params))
+
+    def test_missing_required_argument_returns_error_result(self):
+        def update(operator_name: str, dev_operator_name: str | None = None):
+            """Update."""
+            return {"ok": True}
+
+        bridge = self._make_bridge(update)
+        result = self._call(bridge, "update", {})
+
+        assert result.is_error is True
+        assert "update" in result.content[0].text
+        assert "operator_name" in result.content[0].text
+
+    def test_omitted_optional_argument_succeeds(self):
+        def update(operator_name: str, dev_operator_name: str | None = None):
+            """Update."""
+            return {"name": operator_name, "link": dev_operator_name}
+
+        bridge = self._make_bridge(update)
+        result = self._call(bridge, "update", {"operator_name": "mul"})
+
+        assert not result.is_error
+        assert json.loads(result.content[0].text) == {"name": "mul", "link": None}
+
+    def test_runtime_error_returns_error_result(self):
+        def boom(x: str):
+            """Explode."""
+            raise RuntimeError("kaboom")
+
+        bridge = self._make_bridge(boom)
+        result = self._call(bridge, "boom", {"x": "1"})
+
+        assert result.is_error is True
+        assert "kaboom" in result.content[0].text
+
+    def test_unknown_tool_still_raises(self):
+        def update(operator_name: str):
+            """Update."""
+            return {}
+
+        bridge = self._make_bridge(update)
+        with pytest.raises(Exception):
+            self._call(bridge, "nope", {})
 
 
 class TestMCPStdioServerInit:

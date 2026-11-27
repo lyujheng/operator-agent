@@ -36,6 +36,50 @@ class TestFuncToSchema:
         # Should still produce a schema with string defaults.
         assert "x" in schema["function"]["parameters"]["properties"]
 
+    def test_optional_without_default_is_required_and_nullable(self):
+        def f(name: str, note: str | None) -> str:
+            """Take an optional but mandatory value."""
+            return name
+
+        params = func_to_schema(f)["function"]["parameters"]
+        assert params["required"] == ["name", "note"]
+        assert params["properties"]["note"] == {
+            "anyOf": [{"type": "string"}, {"type": "null"}]
+        }
+
+    def test_optional_with_default_is_not_required_and_nullable(self):
+        def f(name: str, note: str | None = None) -> str:
+            """Take an optional value."""
+            return name
+
+        params = func_to_schema(f)["function"]["parameters"]
+        assert params["required"] == ["name"]
+        assert params["properties"]["note"] == {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        }
+
+    def test_optional_list_stays_nullable(self):
+        def f(items: list[str] | None = None) -> int:
+            """Take optional items."""
+            return 0
+
+        prop = func_to_schema(f)["function"]["parameters"]["properties"]["items"]
+        assert prop["anyOf"] == [
+            {"type": "array", "items": {"type": "string"}},
+            {"type": "null"},
+        ]
+        assert prop["default"] is None
+
+    def test_non_optional_unchanged(self):
+        def f(count: int) -> int:
+            """Plain param."""
+            return count
+
+        params = func_to_schema(f)["function"]["parameters"]
+        assert params["properties"]["count"] == {"type": "integer"}
+        assert params["required"] == ["count"]
+
 
 class TestToolRegistry:
     def test_register_and_get(self):

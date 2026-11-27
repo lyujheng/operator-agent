@@ -147,8 +147,13 @@ class MCPBridgeServer:
                 text = json.dumps(result, ensure_ascii=False, default=str)
                 return CallToolResult(content=[TextContent(type="text", text=text)])
             except Exception as exc:
+                # Surface the failure as an MCP tool error rather than killing
+                # the JSON-RPC request: the ReAct loop sees it and can correct.
                 logger.error("Tool %s execution error: %s", name, exc, exc_info=True)
-                raise
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"Tool '{name}' failed: {exc}")],
+                    isError=True,
+                )
 
         server.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)
         server.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)

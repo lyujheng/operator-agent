@@ -28,9 +28,9 @@ def _python_type_to_json_schema(tp: Any) -> dict[str, Any]:
     """Convert a Python type annotation to a JSON Schema fragment."""
     origin = getattr(tp, "__origin__", None)
 
-    # Handle Optional (Union[X, None])
-    if origin is type(None):
-        return {"type": "string"}
+    # Bare None annotation: only value allowed is null
+    if tp is type(None):
+        return {"type": "null"}
 
     # Handle list[X]
     if origin is list:
@@ -42,13 +42,12 @@ def _python_type_to_json_schema(tp: Any) -> dict[str, Any]:
     if origin is dict:
         return {"type": "object"}
 
-    # Handle Union / Optional
+    # Handle Union / Optional: keep the null branch so callers can express None
     args = getattr(tp, "__args__", None)
     if args and type(None) in args:
-        # Optional[X] — use X's schema
         non_none = [a for a in args if a is not type(None)]
-        if non_none:
-            return _python_type_to_json_schema(non_none[0])
+        base = _python_type_to_json_schema(non_none[0]) if non_none else {}
+        return {"anyOf": [base, {"type": "null"}]}
 
     # Primitive types
     if tp in _TYPE_MAP:
