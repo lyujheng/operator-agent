@@ -28,6 +28,7 @@ from agent_framework.tracing import (
 
 from operator_allocation.agents.main_agent import AgentOrchestrator
 from operator_allocation.config.settings import AppSettings
+from operator_allocation.models.operator import DEFAULT_DEV_STATUS
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ def load_dev_table_excel(path: str) -> dict[str, list[dict[str, Any]]]:
             # Excel columns: id(0) | operator_name(1) | status(2)
             operators.append({
                 "operator_name": str(row[1] if len(row) > 1 else "").strip(),
-                "status": str(row[2] if len(row) > 2 else "not_developed").strip(),
+                "status": str(row[2] if len(row) > 2 else DEFAULT_DEV_STATUS).strip(),
             })
         dev_table[sheet_name] = operators
 

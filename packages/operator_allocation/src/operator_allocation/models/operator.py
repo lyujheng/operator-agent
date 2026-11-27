@@ -10,6 +10,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+# Default status for newly added dev operators.
+DEFAULT_DEV_STATUS = "not_developed"
+
 
 class RequirementOperator(BaseModel):
     """A single operator from the requirement Excel input."""
@@ -30,7 +33,7 @@ class DevOperator(BaseModel):
     """A single operator from the development table."""
 
     operator_name: str
-    status: str = "not_developed"  # not_developed / in_progress / completed
+    status: str = DEFAULT_DEV_STATUS  # not_developed / in_progress / completed
 
 
 class ResultOperator(BaseModel):

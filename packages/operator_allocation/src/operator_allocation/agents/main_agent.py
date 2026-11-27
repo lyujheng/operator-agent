@@ -32,8 +32,8 @@ from agent_framework.tracing.context import span
 from operator_allocation.config.no_dev_config import NO_DEV_PROFILES
 from operator_allocation.config.settings import AppSettings
 from operator_allocation.models.no_dev import NoDevFilterProfile
-from operator_allocation.models.operator import ProcessResult
-from operator_allocation.tools.identify_tools import parse_reference_url
+from operator_allocation.models.operator import DEFAULT_DEV_STATUS, ProcessResult
+from operator_allocation.tools.identify_tools import configure_patterns, parse_reference_url
 from operator_allocation.tools.link_tools import (
     get_operators,
     set_operators,
@@ -944,6 +944,10 @@ class AgentOrchestrator:
     async def _identify_operators(self) -> list[dict[str, Any]]:
         """Two-phase identification: rule-based then LLM-based."""
 
+        # Build URL/path patterns from config so adding a new repo in
+        # lib_repo_mapping is sufficient — no hardcoded lib names needed.
+        configure_patterns(self.settings.lib_repo_mapping)
+
         parsed: list[dict[str, Any]] = []
         unparsed: list[dict[str, Any]] = []
 
@@ -1078,7 +1082,7 @@ class AgentOrchestrator:
         # Determine the lib name that maps to pytorch (for aten fallback rule).
         pytorch_lib = next(
             (lib for lib, repo in self.settings.lib_repo_mapping.items() if repo == "pytorch"),
-            "FlagGems",  # sensible default if no pytorch mapping exists
+            "unrecognized",  # no pytorch mapping → aten ops fall to unrecognized
         )
 
         identify_prompt = IDENTIFY_AGENT_SYSTEM_PROMPT_TEMPLATE.format(
@@ -1312,8 +1316,9 @@ class AgentOrchestrator:
                     if link and sheet_name in self.settings.repo_libs:
                         existing = {o["operator_name"] for o in self._dev_table.get(sheet_name, [])}
                         existing |= {o["operator_name"] for o in local_new_dev.get(sheet_name, [])}
+                        existing |= {o["operator_name"] for o in self._new_dev_entries.get(sheet_name, [])}
                         if link not in existing:
-                            new_entry = {"operator_name": link, "status": "not_developed"}
+                            new_entry = {"operator_name": link, "status": DEFAULT_DEV_STATUS}
                             local_new_dev.setdefault(sheet_name, []).append(new_entry)
                             dev_ops.append(new_entry)
 

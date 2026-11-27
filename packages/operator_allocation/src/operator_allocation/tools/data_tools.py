@@ -11,14 +11,16 @@ import logging
 import re
 from typing import Any
 
+from operator_allocation.models.operator import DEFAULT_DEV_STATUS
+
 logger = logging.getLogger(__name__)
 
-# Default valid operator_lib values — used as fallback only.
+# Default valid operator_lib values — empty until set_valid_libs() is called.
 # In production, main_agent.py passes valid_libs explicitly via MCP kwargs
 # (from settings.valid_libs), so this default is NOT the primary source of truth.
-# The config-driven AppSettings.valid_libs is authoritative; this fallback
-# exists for backward compatibility and test convenience.
-_valid_libs: set[str] = {"FlagGems", "FlagGems-vllm", "FlagGems-sglang", "unrecognized"}
+# Using an empty set here ensures that any code path that forgets to inject
+# valid_libs will log a warning rather than silently using stale hardcoded names.
+_valid_libs: set[str] = set()
 
 
 def set_valid_libs(libs: set[str]) -> None:
@@ -71,7 +73,7 @@ def read_dev_operators(sheet_name: str) -> list[dict[str, Any]]:
     return [
         {
             "operator_name": op.get("operator_name", ""),
-            "status": op.get("status", "not_developed"),
+            "status": op.get("status", DEFAULT_DEV_STATUS),
         }
         for op in operators
     ]
@@ -129,7 +131,7 @@ def add_dev_operator(sheet_name: str, operator_name: str) -> dict[str, Any]:
             }
 
     # Append new operator.
-    new_op = {"operator_name": operator_name, "status": "not_developed"}
+    new_op = {"operator_name": operator_name, "status": DEFAULT_DEV_STATUS}
     _dev_table[sheet_name].append(new_op)
 
     logger.info(
@@ -281,6 +283,11 @@ def check_result(
         ``{"passed": bool, "errors": [{"type": str, "operator_name": str, "detail": str}]}``
     """
     if valid_libs is None:
+        if not _valid_libs:
+            logger.warning(
+                "check_result called without valid_libs and _valid_libs is empty. "
+                "Call set_valid_libs() or pass valid_libs explicitly."
+            )
         valid_libs = _valid_libs
     else:
         valid_libs = set(valid_libs)  # Ensure O(1) lookup; MCP may pass list.

@@ -1,7 +1,6 @@
 """Tools module.
 
 Package-level exports use the in-memory ``data_tools`` implementations.
-For CLI-layer Excel I/O, import directly from ``operator_allocation.tools.excel_tools``.
 """
 
 from operator_allocation.tools.data_tools import (

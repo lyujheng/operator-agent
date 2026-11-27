@@ -7,15 +7,29 @@ then register a NoDevFilterProfile here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from operator_allocation.models.no_dev import NoDevFilterProfile
+
+# Resolve the project root relative to this file so profile paths are
+# CWD-independent.  Structure: packages/operator_allocation/src/operator_allocation/config/no_dev_config.py
+# → 5 parents up = packages/ → 1 more = project root.
+_PROJECT_ROOT = Path(__file__).resolve().parents[5]
+_NO_DEV_DIR = _PROJECT_ROOT / "resources" / "no_dev"
+
+
+def _res(relative: str) -> str:
+    """Return an absolute path under resources/no_dev/."""
+    return str(_NO_DEV_DIR / relative)
+
 
 # ── FlagGems Profile ───────────────────────────────────────────
 
 FLAGGEMS_PROFILE = NoDevFilterProfile(
     lib_name="FlagGems",
-    known_list_path="resources/no_dev/torch_no_dev_ops.md",
-    pending_list_path="resources/no_dev/torch_no_dev_ops_pending.md",
-    prompt_path="resources/no_dev/prompts/torch_no_dev_prompt.md",
+    known_list_path=_res("torch_no_dev_ops.md"),
+    pending_list_path=_res("torch_no_dev_ops_pending.md"),
+    prompt_path=_res("prompts/torch_no_dev_prompt.md"),
     llm_batch_size=8,
     confidence_threshold="high",
 )
@@ -26,9 +40,9 @@ FLAGGEMS_PROFILE = NoDevFilterProfile(
 
 FLAGGEMS_VLLM_PROFILE = NoDevFilterProfile(
     lib_name="FlagGems-vllm",
-    known_list_path="resources/no_dev/vllm_no_dev_ops.md",
-    pending_list_path="resources/no_dev/vllm_no_dev_ops_pending.md",
-    prompt_path="resources/no_dev/prompts/vllm_no_dev_prompt.md",
+    known_list_path=_res("vllm_no_dev_ops.md"),
+    pending_list_path=_res("vllm_no_dev_ops_pending.md"),
+    prompt_path=_res("prompts/vllm_no_dev_prompt.md"),
     llm_batch_size=8,
     confidence_threshold="high",
     valid_categories={"compile_wrapper"},

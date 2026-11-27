@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from operator_allocation.tools.identify_tools import parse_reference_url
+from operator_allocation.tools.identify_tools import configure_patterns, parse_reference_url
 
 
 class TestParseReferenceUrl:

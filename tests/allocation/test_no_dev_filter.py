@@ -788,14 +788,19 @@ class TestVllmConfigParsing:
         """[no_dev_filter.FlagGems-vllm] should parse into NoDevFilterLibSettings."""
         from operator_allocation.config.settings import AppSettings
 
-        config_content = """\
+        # Create repo dirs so the new startup validation passes.
+        base_dir = tmp_path / "repos"
+        (base_dir / "pytorch").mkdir(parents=True)
+        (base_dir / "vllm").mkdir(parents=True)
+
+        config_content = f"""\
 [llm]
 base_url = "http://test"
 api_key = "test-key"
 model = "test-model"
 
 [repos]
-base_dir = "/tmp/repos"
+base_dir = "{base_dir}"
 
 [excel]
 dev_table_path = "/tmp/dev.xlsx"

@@ -44,6 +44,13 @@ class AgentSettings(BaseModel):
     max_retries: int = 10
     max_tool_result_chars: int = 8000
     context_compress_threshold: int = 30000
+    skip_grep_repos: list[str] = Field(default_factory=lambda: ["pytorch"])
+    """Repo directory names that skip batch grep verification.
+
+    Grep is skipped when the repo is too large or when URL-pattern matching
+    is already reliable (e.g. pytorch/ATen ops). Add a repo name here when
+    definition search would be slow or unnecessary for that codebase.
+    """
 
 
 class NoDevFilterLibSettings(BaseModel):
@@ -121,6 +128,51 @@ class AppSettings(BaseSettings):
                 f"Set them in {config_path} or via environment variables."
             )
 
+        # Validate repo paths — fail fast so path errors surface at startup,
+        # not deep inside a ReAct loop after spending LLM tokens.
+        repo_errors = []
+        if settings.repos.base_dir:
+            base = Path(settings.repos.base_dir)
+            if not base.exists():
+                repo_errors.append(f"repos.base_dir does not exist: {base}")
+            else:
+                for lib, repo_dir in settings.lib_repo_mapping.items():
+                    repo_path = base / repo_dir
+                    if not repo_path.exists():
+                        repo_errors.append(
+                            f"repo directory for lib '{lib}' does not exist: {repo_path}"
+                        )
+        elif settings.lib_repo_mapping:
+            repo_errors.append(
+                "repos.base_dir is empty but lib_repo_mapping is configured"
+            )
+        if repo_errors:
+            raise ValueError(
+                "Invalid repo config:\n" + "\n".join(f"  - {e}" for e in repo_errors)
+            )
+
+        # Validate no_dev_filter resource files.
+        nodev_errors = []
+        for lib_name, lib_settings in settings.no_dev_filter.items():
+            if lib_name not in settings.lib_repo_mapping:
+                nodev_errors.append(
+                    f"no_dev_filter lib '{lib_name}' is not in lib_repo_mapping"
+                )
+            for attr, label in [
+                ("known_list_path", "known_list_path"),
+                ("prompt_path", "prompt_path"),
+            ]:
+                file_path = getattr(lib_settings, attr, "")
+                if file_path and not Path(file_path).exists():
+                    nodev_errors.append(
+                        f"no_dev_filter.{lib_name}.{label} does not exist: {file_path}"
+                    )
+        if nodev_errors:
+            raise ValueError(
+                "Invalid no_dev_filter config:\n"
+                + "\n".join(f"  - {e}" for e in nodev_errors)
+            )
+
         return settings
 
     # ── Computed properties derived from lib_repo_mapping ────────
@@ -137,12 +189,14 @@ class AppSettings(BaseSettings):
 
     @property
     def skip_grep_libs(self) -> set[str]:
-        """Libs whose repo is too large for per-operator grep verification.
+        """Libs whose repo is in agent.skip_grep_repos (skips batch grep verification).
 
-        Currently: libs mapping to "pytorch" (ATen ops identified by URL
-        pattern, no grep needed).
+        Derived from ``agent.skip_grep_repos`` config — set that list to control
+        which repos bypass grep. Defaults to ``["pytorch"]`` (ATen ops are
+        identified by URL pattern and don't need definition search).
         """
-        return {lib for lib, repo in self.lib_repo_mapping.items() if repo == "pytorch"}
+        skip = set(self.agent.skip_grep_repos)
+        return {lib for lib, repo in self.lib_repo_mapping.items() if repo in skip}
 
     @property
     def all_repo_names(self) -> set[str]:

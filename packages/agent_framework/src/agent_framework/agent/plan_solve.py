@@ -262,8 +262,7 @@ class PlanSolveAgent(BaseAgent):
                     description="识别需求表中各算子所属的 operator_lib",
                     agent_type="identify",
                     expected_criteria=(
-                        "所有算子的 operator_lib 字段必须为 "
-                        "FlagGems / FlagGems-vllm / FlagGems-sglang / unrecognized 之一"
+                        "所有算子的 operator_lib 字段已填充且不为空"
                     ),
                 ),
                 PlanStep(
